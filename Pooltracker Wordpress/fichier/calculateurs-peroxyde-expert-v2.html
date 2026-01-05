@@ -1,0 +1,151 @@
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Calculateurs Expert Peroxyde - Pool Assistant</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f4f6f7;
+        }
+        h2 {
+            color: #0077b6;
+        }
+        .calculator {
+            background: #ffffff;
+            border: 1px solid #ccc;
+            padding: 20px;
+            margin-bottom: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+        label, select, input {
+            display: block;
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        input[type="number"], select {
+            width: 100%;
+            padding: 8px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #0077b6;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .result {
+            margin-top: 15px;
+            font-weight: bold;
+            color: #023047;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="calculator">
+        <h2>💧 Calculateur expert de dosage en peroxyde (11,5%)</h2>
+        <label for="volume">Volume de la piscine (m³) :</label>
+        <input type="number" id="volume" min="1">
+
+        <label for="traitement">Type de traitement :</label>
+        <select id="traitement">
+            <option value="15">Entretien léger (15 ppm)</option>
+            <option value="30">Traitement correctif (30 ppm)</option>
+            <option value="50">Traitement choc anti-algues (50 ppm)</option>
+            <option value="70">Traitement très agressif (70 ppm)</option>
+        </select>
+
+        <button onclick="calculerPeroxyde()">Calculer la dose</button>
+        <div id="result1" class="result"></div>
+    </div>
+
+    <div class="calculator">
+        <h2>⏳ Calculateur expert de disparition du peroxyde en eau chlorée</h2>
+
+        <label for="dateAjout">Date et heure d’ajout du peroxyde :</label>
+        <input type="datetime-local" id="dateAjout">
+
+        <label for="volume2">Volume de la piscine (m³) :</label>
+        <input type="number" id="volume2" min="1">
+
+        <label for="temp">Température moyenne de l’eau (°C) :</label>
+        <input type="number" id="temp" min="5" max="40">
+
+        <label for="ph">pH de l’eau :</label>
+        <input type="number" id="ph" min="6.5" max="8.5" step="0.1">
+
+        <label for="chlore">Taux de chlore libre (mg/L) <strong>(avant ajout de peroxyde)</strong> :</label>
+        <input type="number" id="chlore" min="0" step="0.1">
+
+        <label for="litresPeroxyde">Litres de peroxyde à 11,5 % ajoutés :</label>
+        <input type="number" id="litresPeroxyde" min="0.1" step="0.1">
+
+        <button onclick="estimerDuree()">Estimer la durée</button>
+        <div id="result2" class="result"></div>
+    </div>
+
+    <script>
+        function calculerPeroxyde() {
+            const volume = parseFloat(document.getElementById('volume').value);
+            const ppm = parseFloat(document.getElementById('traitement').value);
+            const masseH2O2 = volume * ppm;
+            const litresPeroxyde115 = (masseH2O2 / 1000) / 0.115;
+            const result = litresPeroxyde115.toFixed(2);
+            document.getElementById('result1').innerText = `➡️ Vous devez ajouter environ ${result} litres de peroxyde à 11,5 %.`;
+        }
+
+        function estimerDuree() {
+            const dateAjout = new Date(document.getElementById('dateAjout').value);
+            const temp = parseFloat(document.getElementById('temp').value);
+            const ph = parseFloat(document.getElementById('ph').value);
+            const chlore = parseFloat(document.getElementById('chlore').value);
+            const litresPeroxyde = parseFloat(document.getElementById('litresPeroxyde').value);
+            const volumePiscine = parseFloat(document.getElementById('volume2').value);
+
+            // Conversion des litres de peroxyde 11,5% → ppm
+            const masseH2O2 = litresPeroxyde * 0.115 * 1000; // en grammes
+            const ppm = masseH2O2 / volumePiscine; // ppm réel
+
+            let heures = 0;
+
+            if (chlore >= 4) {
+                heures -= 8;
+            } else if (chlore >= 2) {
+                heures -= 4;
+            }
+
+            if (ph < 7.0) {
+                heures -= 6;
+            } else if (ph < 7.4) {
+                heures -= 3;
+            }
+
+            if (temp >= 30) {
+                heures += 24;
+            } else if (temp >= 24) {
+                heures += 36;
+            } else {
+                heures += 48;
+            }
+
+            if (ppm >= 60) {
+                heures += 24;
+            } else if (ppm >= 40) {
+                heures += 12;
+            }
+
+            if (heures < 6) heures = 6;
+
+            const disparition = new Date(dateAjout.getTime() + heures * 60 * 60 * 1000);
+            document.getElementById('result2').innerText = `🕒 Le peroxyde ajouté devrait être dissipé vers le ${disparition.toLocaleString("fr-FR")} (estimation experte basée sur les conditions entrées).`;
+        }
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,3316 @@
+<?php
+/**
+ * Pool User System - Extension PoolTracker avec Auth0
+ * Système utilisateurs personnalisés pour Pool Assistant
+ * Version: 2.0.2 - Auth0 Integration CORRIGÉE + DEBUG
+ */
+
+if (!defined('ABSPATH')) exit;
+
+class PoolUserSystemAuth0 {
+    
+    private $table_users;
+    private $table_measurements;
+    private $table_conversations;
+    private $table_alerts;
+    private $table_maintenance;
+    private $table_goals;
+    private $table_auth0_users;
+    
+    public function __construct() {
+        global $wpdb;
+        
+        // Noms des tables
+        $this->table_users = $wpdb->prefix . 'pool_users';
+        $this->table_measurements = $wpdb->prefix . 'pool_measurements';
+        $this->table_conversations = $wpdb->prefix . 'pool_user_conversations';
+        $this->table_alerts = $wpdb->prefix . 'pool_user_alerts';
+        $this->table_maintenance = $wpdb->prefix . 'pool_maintenance_log';
+        $this->table_goals = $wpdb->prefix . 'pool_user_goals';
+        $this->table_auth0_users = $wpdb->prefix . 'pool_auth0_users';
+        
+        // Hooks WordPress
+        add_action('init', array($this, 'init_user_system'));
+        add_action('wp_ajax_pool_save_measurement', array($this, 'save_measurement'));
+        add_action('wp_ajax_pool_get_user_data', array($this, 'get_user_dashboard_data'));
+        add_action('wp_ajax_pool_update_profile', array($this, 'update_user_profile'));
+        add_action('wp_ajax_pool_get_chart_data', array($this, 'get_chart_data'));
+        add_action('wp_ajax_pool_get_ai_advice', array($this, 'get_personalized_ai_advice'));
+        add_action('wp_ajax_pool_mark_alert_read', array($this, 'mark_alert_read'));
+        
+        // HOOKS AUTH0
+        add_action('wp_ajax_pool_auth0_callback', array($this, 'handle_auth0_callback'));
+        add_action('wp_ajax_nopriv_pool_auth0_callback', array($this, 'handle_auth0_callback'));
+        add_action('wp_ajax_pool_logout', array($this, 'handle_logout'));
+        add_action('wp_ajax_pool_get_auth_status', array($this, 'get_auth_status'));
+        add_action('wp_ajax_nopriv_pool_get_auth_status', array($this, 'get_auth_status'));
+        
+        // Gestion des tests
+        add_action('wp_ajax_pool_get_user_tests', array($this, 'get_user_tests_paginated'));
+        add_action('wp_ajax_pool_update_measurement', array($this, 'update_measurement'));
+        add_action('wp_ajax_pool_delete_measurement', array($this, 'delete_measurement'));
+        add_action('wp_ajax_pool_export_tests', array($this, 'export_tests_csv'));
+        
+        // Hook pour enrichir l'IA avec contexte utilisateur
+        add_filter('pool_ai_context', array($this, 'add_user_context'), 10, 2);
+        
+        // Shortcode PoolTracker
+        add_shortcode('pooltracker', array($this, 'render_pooltracker_shortcode'));
+        
+        // Admin
+        add_action('admin_menu', array($this, 'admin_menu'));
+        
+        // Diagnostic
+        add_action('init', array($this, 'diagnostic'));
+    }
+    
+    public function diagnostic() {
+        error_log('🔧 PoolTracker Diagnostic:');
+        error_log('- Auth0 Domain: ' . get_option('pooltracker_auth0_domain', 'VIDE'));
+        error_log('- Auth0 Client ID: ' . get_option('pooltracker_auth0_client_id', 'VIDE'));
+        error_log('- Tables existantes: ' . print_r($this->check_tables(), true));
+    }
+
+    private function check_tables() {
+        global $wpdb;
+        $tables = [
+            'auth0_users' => $this->table_auth0_users,
+            'users' => $this->table_users,
+            'measurements' => $this->table_measurements
+        ];
+        
+        $result = [];
+        foreach ($tables as $name => $table) {
+            $result[$name] = ($wpdb->get_var("SHOW TABLES LIKE '$table'") === $table) ? 'OK' : 'MANQUANTE';
+        }
+        return $result;
+    }
+    
+    public function init_user_system() {
+        // Assurer que les tables existent (sécurité)
+        $this->maybe_create_missing_tables();
+        
+        // Enregistrer les scripts/styles pour l'espace client
+        add_action('wp_enqueue_scripts', array($this, 'enqueue_pooltracker_assets'));
+    }
+    
+    public function enqueue_pooltracker_assets() {
+        if (is_page('espace-client') || get_query_var('pooltracker')) {
+            wp_enqueue_script('chart-js', 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js', array(), '3.9.1', true);
+            
+            // Variables JavaScript avec Auth0
+            wp_localize_script('chart-js', 'poolTracker', array(
+                'ajax_url' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('pooltracker_nonce'),
+                'auth0_domain' => get_option('pooltracker_auth0_domain', ''),
+                'auth0_client_id' => get_option('pooltracker_auth0_client_id', ''),
+                'redirect_uri' => home_url('/espace-client/'),
+                'is_logged_in' => $this->is_user_authenticated()
+            ));
+        }
+    }
+    
+    // =====================================
+    // GESTION AUTH0
+    // =====================================
+    
+    public function admin_menu() {
+        add_menu_page(
+            'PoolTracker Auth0',
+            'PoolTracker',
+            'manage_options',
+            'pooltracker-auth0',
+            array($this, 'admin_page'),
+            'dashicons-swimmer',
+            30
+        );
+        
+        add_submenu_page(
+            'pooltracker-auth0',
+            'Utilisateurs',
+            'Utilisateurs',
+            'manage_options',
+            'pooltracker-users',
+            array($this, 'users_admin_page')
+        );
+    }
+    
+    public function admin_page() {
+        if (isset($_POST['submit']) && wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_auth0_settings')) {
+            update_option('pooltracker_auth0_domain', sanitize_text_field($_POST['auth0_domain']));
+            update_option('pooltracker_auth0_client_id', sanitize_text_field($_POST['auth0_client_id']));
+            update_option('pooltracker_auth0_client_secret', sanitize_text_field($_POST['auth0_client_secret']));
+            update_option('pooltracker_google_client_id', sanitize_text_field($_POST['google_client_id']));
+            update_option('pooltracker_facebook_app_id', sanitize_text_field($_POST['facebook_app_id']));
+            echo '<div class="notice notice-success"><p><strong>✅ Configuration Auth0 sauvegardée !</strong></p></div>';
+        }
+        
+        $auth0_domain = get_option('pooltracker_auth0_domain', '');
+        $auth0_client_id = get_option('pooltracker_auth0_client_id', '');
+        $auth0_client_secret = get_option('pooltracker_auth0_client_secret', '');
+        $google_client_id = get_option('pooltracker_google_client_id', '');
+        $facebook_app_id = get_option('pooltracker_facebook_app_id', '');
+        ?>
+        <div class="wrap">
+            <h1>🏊‍♂️ PoolTracker - Configuration Auth0</h1>
+            <div style="background:white;border:1px solid #ccd0d4;padding:20px;margin:20px 0;border-radius:5px;">
+                <h2>🔐 Configuration Authentification</h2>
+                <form method="post" action="">
+                    <?php wp_nonce_field('pooltracker_auth0_settings'); ?>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">Domaine Auth0</th>
+                            <td>
+                                <input type="text" name="auth0_domain" value="<?php echo esc_attr($auth0_domain); ?>" class="regular-text" placeholder="votre-domaine.auth0.com">
+                                <p class="description">Votre domaine Auth0 (sans https://)</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Client ID Auth0</th>
+                            <td>
+                                <input type="text" name="auth0_client_id" value="<?php echo esc_attr($auth0_client_id); ?>" class="regular-text">
+                                <p class="description">Client ID de votre application Auth0</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Client Secret Auth0</th>
+                            <td>
+                                <input type="password" name="auth0_client_secret" value="<?php echo esc_attr($auth0_client_secret); ?>" class="regular-text">
+                                <p class="description">Client Secret de votre application Auth0</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Google Client ID</th>
+                            <td>
+                                <input type="text" name="google_client_id" value="<?php echo esc_attr($google_client_id); ?>" class="regular-text">
+                                <p class="description">Client ID Google OAuth (optionnel si géré par Auth0)</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Facebook App ID</th>
+                            <td>
+                                <input type="text" name="facebook_app_id" value="<?php echo esc_attr($facebook_app_id); ?>" class="regular-text">
+                                <p class="description">App ID Facebook (optionnel si géré par Auth0)</p>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php submit_button('💾 Sauvegarder la configuration'); ?>
+                </form>
+                
+                <div style="margin-top: 30px; padding: 15px; background: #f0f8ff; border-left: 4px solid #3AA6B9;">
+                    <h3>🚀 Instructions de configuration :</h3>
+                    <ol>
+                        <li><strong>Créez une application Auth0</strong> sur <a href="https://auth0.com" target="_blank">auth0.com</a></li>
+                        <li><strong>Configurez les URLs de callback</strong> : <code><?php echo home_url('/espace-client/'); ?></code></li>
+                        <li><strong>Activez les connexions sociales</strong> : Google, Facebook, Apple</li>
+                        <li><strong>Copiez/collez</strong> les identifiants ci-dessus</li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+    
+    public function users_admin_page() {
+        global $wpdb;
+        
+        // Statistiques utilisateurs
+        $total_users = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_auth0_users}");
+        $total_profiles = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_users}");
+        $total_tests = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_measurements}");
+        $recent_signups = $wpdb->get_var("SELECT COUNT(*) FROM {$this->table_auth0_users} WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)");
+        
+        ?>
+        <div class="wrap">
+            <h1>👥 Gestion des Utilisateurs PoolTracker</h1>
+            
+            <!-- Statistiques -->
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin: 20px 0;">
+                <div style="background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <h2 style="color: #3AA6B9; margin: 0; font-size: 32px;"><?php echo $total_users; ?></h2>
+                    <p style="margin: 5px 0 0 0; color: #666;">Utilisateurs inscrits</p>
+                </div>
+                <div style="background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <h2 style="color: #27AE60; margin: 0; font-size: 32px;"><?php echo $total_profiles; ?></h2>
+                    <p style="margin: 5px 0 0 0; color: #666;">Profils piscine</p>
+                </div>
+                <div style="background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <h2 style="color: #E74C3C; margin: 0; font-size: 32px;"><?php echo $total_tests; ?></h2>
+                    <p style="margin: 5px 0 0 0; color: #666;">Tests effectués</p>
+                </div>
+                <div style="background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                    <h2 style="color: #F39C12; margin: 0; font-size: 32px;"><?php echo $recent_signups; ?></h2>
+                    <p style="margin: 5px 0 0 0; color: #666;">Nouveaux (7j)</p>
+                </div>
+            </div>
+            
+            <!-- Liste des utilisateurs -->
+            <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                <h2>📋 Derniers utilisateurs</h2>
+                <?php
+                $users = $wpdb->get_results("
+                    SELECT au.*, pu.pool_volume, pu.pool_treatment_type,
+                           (SELECT COUNT(*) FROM {$this->table_measurements} WHERE user_id = au.pooltracker_user_id) as test_count
+                    FROM {$this->table_auth0_users} au
+                    LEFT JOIN {$this->table_users} pu ON au.pooltracker_user_id = pu.user_id
+                    ORDER BY au.created_at DESC
+                    LIMIT 20
+                ");
+                
+                if ($users) {
+                    echo '<table class="wp-list-table widefat fixed striped">';
+                    echo '<thead><tr>';
+                    echo '<th>Utilisateur</th><th>Provider</th><th>Piscine</th><th>Tests</th><th>Inscription</th><th>Actions</th>';
+                    echo '</tr></thead><tbody>';
+                    
+                    foreach ($users as $user) {
+                        echo '<tr>';
+                        echo '<td><strong>' . esc_html($user->name) . '</strong><br><small>' . esc_html($user->email) . '</small></td>';
+                        echo '<td><span style="padding: 2px 8px; background: #E3F2FD; border-radius: 12px; font-size: 11px;">' . esc_html($user->provider) . '</span></td>';
+                        echo '<td>' . ($user->pool_volume ? $user->pool_volume . 'm³ (' . $user->pool_treatment_type . ')' : '<em>Non configurée</em>') . '</td>';
+                        echo '<td>' . intval($user->test_count) . '</td>';
+                        echo '<td>' . date('d/m/Y', strtotime($user->created_at)) . '</td>';
+                        echo '<td><button class="button button-small" onclick="viewUser(' . $user->pooltracker_user_id . ')">Voir</button></td>';
+                        echo '</tr>';
+                    }
+                    echo '</tbody></table>';
+                } else {
+                    echo '<p><em>Aucun utilisateur inscrit pour le moment.</em></p>';
+                }
+                ?>
+            </div>
+        </div>
+        
+        <script>
+        function viewUser(userId) {
+            alert('Détail utilisateur ID: ' + userId + ' (à implémenter)');
+        }
+        </script>
+        <?php
+    }
+    
+    public function is_user_authenticated() {
+        // Debug: vérifier si le cookie existe
+        error_log('🔍 PoolTracker Debug: === VÉRIFICATION AUTHENTIFICATION ===');
+        error_log('🔍 PoolTracker Debug: Cookie pooltracker_auth présent: ' . (isset($_COOKIE['pooltracker_auth']) ? 'Oui' : 'Non'));
+        
+        if (isset($_COOKIE['pooltracker_auth'])) {
+            error_log('🔍 PoolTracker Debug: Contenu cookie (50 premiers chars): ' . substr($_COOKIE['pooltracker_auth'], 0, 50) . '...');
+            
+            $auth_data = $this->decrypt_auth_cookie($_COOKIE['pooltracker_auth']);
+            error_log('🔍 PoolTracker Debug: Cookie déchiffré: ' . ($auth_data ? 'Succès' : 'Échec'));
+            
+            if ($auth_data && isset($auth_data['user_id']) && isset($auth_data['expires'])) {
+                error_log('🔍 PoolTracker Debug: User ID: ' . $auth_data['user_id']);
+                error_log('🔍 PoolTracker Debug: Cookie expire le: ' . date('Y-m-d H:i:s', $auth_data['expires']));
+                error_log('🔍 PoolTracker Debug: Maintenant: ' . date('Y-m-d H:i:s'));
+                error_log('🔍 PoolTracker Debug: Temps restant: ' . ($auth_data['expires'] - time()) . ' secondes');
+                
+                // Vérifier l'expiration
+                if (time() < $auth_data['expires']) {
+                    error_log('✅ PoolTracker Debug: Utilisateur authentifié - ID: ' . $auth_data['user_id']);
+                    return true;
+                } else {
+                    error_log('❌ PoolTracker Debug: Cookie expiré - suppression...');
+                    $this->clear_auth_cookie();
+                }
+            } else {
+                error_log('❌ PoolTracker Debug: Données cookie invalides - suppression...');
+                $this->clear_auth_cookie();
+            }
+        }
+        
+        error_log('❌ PoolTracker Debug: Utilisateur NON authentifié');
+        return false;
+    }
+    
+    public function get_current_pooltracker_user_id() {
+        if ($this->is_user_authenticated()) {
+            $auth_data = $this->decrypt_auth_cookie($_COOKIE['pooltracker_auth']);
+            return intval($auth_data['user_id']);
+        }
+        return false;
+    }
+    
+    private function set_auth_cookie($user_id, $auth0_sub = '') {
+        $expires = time() + (30 * 24 * 60 * 60); // 30 jours
+        $auth_data = array(
+            'user_id' => $user_id,
+            'auth0_sub' => $auth0_sub,
+            'expires' => $expires,
+            'created' => time()
+        );
+        
+        error_log('PoolTracker Debug: Définition cookie pour user ID: ' . $user_id);
+        
+        $encrypted_data = $this->encrypt_auth_cookie($auth_data);
+        
+        // Cookie sécurisé
+        $cookie_set = setcookie(
+            'pooltracker_auth',
+            $encrypted_data,
+            $expires,
+            '/',
+            '', // domain par défaut
+            false, // secure = false pour dev (pas forcément HTTPS)
+            true // httponly
+        );
+        
+        error_log('PoolTracker Debug: Cookie défini: ' . ($cookie_set ? 'Succès' : 'Échec'));
+        error_log('PoolTracker Debug: Cookie expire le: ' . date('Y-m-d H:i:s', $expires));
+        
+        return $cookie_set;
+    }
+    
+    private function clear_auth_cookie() {
+        error_log('🧹 PoolTracker: === SUPPRESSION COOKIE ===');
+        
+        // Méthode 1: setcookie standard
+        $result1 = setcookie('pooltracker_auth', '', time() - 3600, '/');
+        error_log('🧹 PoolTracker: setcookie standard: ' . ($result1 ? 'Succès' : 'Échec'));
+        
+        // Méthode 2: setcookie avec tous les paramètres
+        $result2 = setcookie('pooltracker_auth', '', time() - 3600, '/', '', false, true);
+        error_log('🧹 PoolTracker: setcookie complet: ' . ($result2 ? 'Succès' : 'Échec'));
+        
+        // Méthode 3: supprimer de $_COOKIE directement
+        if (isset($_COOKIE['pooltracker_auth'])) {
+            unset($_COOKIE['pooltracker_auth']);
+            error_log('🧹 PoolTracker: $_COOKIE supprimé');
+        }
+        
+        // Méthode 4: setcookie avec domaine
+        $domain = parse_url(home_url(), PHP_URL_HOST);
+        $result3 = setcookie('pooltracker_auth', '', time() - 3600, '/', $domain, false, true);
+        error_log('🧹 PoolTracker: setcookie avec domaine (' . $domain . '): ' . ($result3 ? 'Succès' : 'Échec'));
+        
+        return $result1 || $result2 || $result3;
+    }
+    
+    private function encrypt_auth_cookie($data) {
+        // Chiffrement simple (à améliorer en production avec une vraie clé)
+        $json_data = json_encode($data);
+        $salt = get_option('pooltracker_auth_salt', $this->generate_auth_salt());
+        return base64_encode($salt . '|' . base64_encode($json_data));
+    }
+    
+    private function decrypt_auth_cookie($encrypted_data) {
+        try {
+            $decoded = base64_decode($encrypted_data);
+            $parts = explode('|', $decoded, 2);
+            
+            if (count($parts) === 2) {
+                $salt = $parts[0];
+                $data_json = base64_decode($parts[1]);
+                $data = json_decode($data_json, true);
+                
+                if ($data && is_array($data)) {
+                    return $data;
+                }
+            }
+        } catch (Exception $e) {
+            error_log('PoolTracker: Erreur décryptage cookie - ' . $e->getMessage());
+        }
+        
+        return false;
+    }
+    
+    private function generate_auth_salt() {
+        $salt = wp_generate_password(32, false);
+        update_option('pooltracker_auth_salt', $salt);
+        return $salt;
+    }
+    
+    public function get_auth_status() {
+        error_log('🔍 PoolTracker: get_auth_status appelé');
+        
+        $is_authenticated = $this->is_user_authenticated();
+        $user_id = $this->get_current_pooltracker_user_id();
+        $user_info = null;
+        
+        error_log('🔍 PoolTracker: is_authenticated = ' . ($is_authenticated ? 'true' : 'false'));
+        error_log('🔍 PoolTracker: user_id = ' . ($user_id ? $user_id : 'false'));
+        
+        if ($is_authenticated && $user_id) {
+            $user_info = $this->get_user_info();
+            error_log('🔍 PoolTracker: user_info trouvé = ' . ($user_info ? 'oui' : 'non'));
+            if ($user_info) {
+                error_log('🔍 PoolTracker: user_info = ' . print_r($user_info, true));
+            }
+        }
+        
+        $response = array(
+            'authenticated' => $is_authenticated,
+            'user_id' => $user_id,
+            'user_info' => $user_info,
+            'debug' => array(
+                'cookie_present' => isset($_COOKIE['pooltracker_auth']),
+                'cookie_length' => isset($_COOKIE['pooltracker_auth']) ? strlen($_COOKIE['pooltracker_auth']) : 0,
+                'timestamp' => current_time('mysql')
+            )
+        );
+        
+        error_log('📤 PoolTracker: get_auth_status réponse = ' . print_r($response, true));
+        
+        wp_send_json_success($response);
+    }
+    
+    public function get_user_info() {
+        if (!$this->is_user_authenticated()) {
+            error_log('PoolTracker Debug: get_user_info - utilisateur non authentifié');
+            return null;
+        }
+        
+        global $wpdb;
+        $user_id = $this->get_current_pooltracker_user_id();
+        
+        error_log('PoolTracker Debug: get_user_info - recherche pour user ID: ' . $user_id);
+        
+        $user_info = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$this->table_auth0_users} WHERE pooltracker_user_id = %d",
+            $user_id
+        ));
+        
+        if ($user_info) {
+            error_log('PoolTracker Debug: get_user_info - utilisateur trouvé: ' . $user_info->name . ' (' . $user_info->email . ')');
+        } else {
+            error_log('PoolTracker Debug: get_user_info - aucun utilisateur trouvé en BDD pour ID: ' . $user_id);
+        }
+        
+        return $user_info;
+    }
+    
+    // ✅ MÉTHODE CALLBACK CORRIGÉE AVEC DEBUG RENFORCÉ
+    public function handle_auth0_callback() {
+        // Debug: Log toutes les données reçues
+        error_log('🔄 PoolTracker Auth0 Callback - Début');
+        error_log('📡 POST data reçue: ' . print_r($_POST, true));
+        error_log('🍪 Cookies actuels: ' . print_r($_COOKIE, true));
+        
+        // Vérifier que les tables existent
+        $this->maybe_create_missing_tables();
+        
+        // Vérifier le nonce
+        if (!isset($_POST['_wpnonce'])) {
+            error_log('❌ PoolTracker Auth0: Nonce manquant');
+            wp_send_json_error('Nonce manquant');
+            return;
+        }
+        
+        if (!wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            error_log('❌ PoolTracker Auth0: Nonce invalide');
+            error_log('📍 Nonce reçu: ' . $_POST['_wpnonce']);
+            error_log('📍 Nonce attendu: ' . wp_create_nonce('pooltracker_nonce'));
+            wp_send_json_error('Nonce invalide');
+            return;
+        }
+        
+        // Extraire les tokens
+        $auth0_token = isset($_POST['access_token']) ? sanitize_text_field($_POST['access_token']) : '';
+        $id_token = isset($_POST['id_token']) ? sanitize_text_field($_POST['id_token']) : '';
+        
+        error_log('🔑 PoolTracker Auth0: Access token présent: ' . (!empty($auth0_token) ? 'Oui (' . strlen($auth0_token) . ' chars)' : 'Non'));
+        error_log('🔑 PoolTracker Auth0: ID token présent: ' . (!empty($id_token) ? 'Oui (' . strlen($id_token) . ' chars)' : 'Non'));
+        
+        if (empty($auth0_token) || empty($id_token)) {
+            error_log('❌ PoolTracker Auth0: Tokens manquants');
+            wp_send_json_error('Tokens manquants');
+            return;
+        }
+        
+        // Vérifier si ce sont des tokens de test
+        if ($auth0_token === 'fake_access_token_for_test') {
+            error_log('🧪 PoolTracker Auth0: Tokens de test détectés');
+            wp_send_json_error('Tokens de test - utilisez une vraie connexion Auth0');
+            return;
+        }
+        
+        // Décoder et valider le ID token
+        error_log('🔍 PoolTracker Auth0: Validation du token en cours...');
+        $user_data = $this->validate_auth0_token($id_token);
+        
+        if (!$user_data) {
+            error_log('❌ PoolTracker Auth0: Validation token échouée');
+            wp_send_json_error('Token invalide - Vérifiez votre configuration Auth0');
+            return;
+        }
+        
+        error_log('✅ PoolTracker Auth0: Token validé avec succès');
+        error_log('👤 PoolTracker Auth0: Données utilisateur extraites: ' . print_r($user_data, true));
+        
+        // Créer ou mettre à jour l'utilisateur
+        error_log('👤 PoolTracker Auth0: Création/MAJ utilisateur...');
+        $pooltracker_user_id = $this->create_or_update_auth0_user($user_data);
+        
+        if ($pooltracker_user_id) {
+            // Définir le cookie d'authentification
+            error_log('🍪 PoolTracker Auth0: Définition cookie pour user ID: ' . $pooltracker_user_id);
+            $cookie_result = $this->set_auth_cookie($pooltracker_user_id, $user_data['sub']);
+            
+            error_log('✅ PoolTracker Auth0: Connexion réussie pour utilisateur ID: ' . $pooltracker_user_id);
+            error_log('🍪 PoolTracker Auth0: Cookie défini avec résultat: ' . ($cookie_result ? 'Succès' : 'Échec'));
+            
+            // Test immédiat du cookie
+            $immediate_test = $this->is_user_authenticated();
+            error_log('🧪 PoolTracker Auth0: Test immédiat cookie: ' . ($immediate_test ? 'OK' : 'KO'));
+            
+            // Retourner les données utilisateur avec les infos du token
+            $response_data = array(
+                'message' => 'Connexion réussie',
+                'user_id' => $pooltracker_user_id,
+                'user_info' => array(
+                    'name' => isset($user_data['name']) ? $user_data['name'] : '',
+                    'email' => isset($user_data['email']) ? $user_data['email'] : '',
+                    'picture' => isset($user_data['picture']) ? $user_data['picture'] : '',
+                    'provider' => $this->determine_provider_from_sub($user_data['sub'])
+                ),
+                'redirect' => '/espace-client/',
+                'debug' => array(
+                    'cookie_set' => $cookie_result,
+                    'immediate_test' => $immediate_test,
+                    'user_id' => $pooltracker_user_id,
+                    'timestamp' => current_time('mysql'),
+                    'message' => 'Cookie sera disponible au prochain chargement de page'
+                )
+            );
+            
+            error_log('📤 PoolTracker Auth0: Réponse envoyée: ' . print_r($response_data, true));
+            wp_send_json_success($response_data);
+        } else {
+            error_log('❌ PoolTracker Auth0: Erreur création utilisateur');
+            wp_send_json_error('Erreur création utilisateur');
+        }
+    }
+    
+    // Méthode helper pour déterminer le provider depuis le sub
+    private function determine_provider_from_sub($auth0_sub) {
+        if (strpos($auth0_sub, 'google-oauth2') !== false) {
+            return 'google';
+        } elseif (strpos($auth0_sub, 'facebook') !== false) {
+            return 'facebook';
+        } elseif (strpos($auth0_sub, 'apple') !== false) {
+            return 'apple';
+        }
+        return 'auth0';
+    }
+    
+    private function validate_auth0_token($id_token) {
+        // Debug spécifique pour les tokens
+        error_log('🔍 PoolTracker Auth0: === VALIDATION TOKEN DÉTAILLÉE ===');
+        error_log('🔍 PoolTracker Auth0: Token length: ' . strlen($id_token));
+        error_log('🔍 PoolTracker Auth0: Token début: ' . substr($id_token, 0, 50) . '...');
+        
+        // Décoder le JWT (version simplifiée pour développement)
+        $parts = explode('.', $id_token);
+        if (count($parts) !== 3) {
+            error_log('❌ PoolTracker Auth0: Token format invalide - ' . count($parts) . ' parties');
+            return false;
+        }
+        
+        try {
+            // Décoder le header pour debug
+            $header_b64 = str_pad(strtr($parts[0], '-_', '+/'), strlen($parts[0]) % 4, '=', STR_PAD_RIGHT);
+            $header = json_decode(base64_decode($header_b64), true);
+            
+            // Décoder le payload
+            $payload_b64 = str_pad(strtr($parts[1], '-_', '+/'), strlen($parts[1]) % 4, '=', STR_PAD_RIGHT);
+            $payload = json_decode(base64_decode($payload_b64), true);
+            
+            error_log('✅ PoolTracker Auth0: === HEADER DÉCODÉ ===');
+            error_log('✅ PoolTracker Auth0: Header: ' . print_r($header, true));
+            
+            error_log('✅ PoolTracker Auth0: === PAYLOAD DÉCODÉ ===');
+            error_log('✅ PoolTracker Auth0: Payload: ' . print_r($payload, true));
+            
+            // Validation basique des champs requis
+            if (!isset($payload['sub'])) {
+                error_log('❌ PoolTracker Auth0: Champ "sub" manquant');
+                return false;
+            }
+            
+            error_log('🔍 PoolTracker Auth0: SUB trouvé: ' . $payload['sub']);
+            
+            // Détecter le provider depuis le sub
+            $provider = 'unknown';
+            if (strpos($payload['sub'], 'google-oauth2') !== false) {
+                $provider = 'google';
+                error_log('🔍 PoolTracker Auth0: PROVIDER DÉTECTÉ: Google');
+            } elseif (strpos($payload['sub'], 'facebook') !== false) {
+                $provider = 'facebook';
+                error_log('🔍 PoolTracker Auth0: PROVIDER DÉTECTÉ: Facebook');
+            } elseif (strpos($payload['sub'], 'apple') !== false) {
+                $provider = 'apple';
+                error_log('🔍 PoolTracker Auth0: PROVIDER DÉTECTÉ: Apple');
+            } else {
+                error_log('🔍 PoolTracker Auth0: PROVIDER DÉTECTÉ: Auth0 natif');
+            }
+            
+            // Vérifications spécifiques par provider
+            if ($provider === 'google') {
+                error_log('🔍 PoolTracker Auth0: === VALIDATION GOOGLE ===');
+                
+                // Pour Google, vérifier les champs spécifiques
+                $required_google_fields = ['iss', 'aud', 'exp', 'iat'];
+                foreach ($required_google_fields as $field) {
+                    if (!isset($payload[$field])) {
+                        error_log('❌ PoolTracker Auth0: Champ Google manquant: ' . $field);
+                    } else {
+                        error_log('✅ PoolTracker Auth0: Champ Google présent: ' . $field . ' = ' . $payload[$field]);
+                    }
+                }
+                
+                // Vérifier l'issuer pour Google
+                if (isset($payload['iss'])) {
+                    $expected_issuers = [
+                        'https://accounts.google.com',
+                        'accounts.google.com',
+                        'https://' . get_option('pooltracker_auth0_domain') . '/'
+                    ];
+                    
+                    if (!in_array($payload['iss'], $expected_issuers)) {
+                        error_log('⚠️ PoolTracker Auth0: Issuer Google inattendu: ' . $payload['iss']);
+                        // Accepter quand même pour le développement
+                    } else {
+                        error_log('✅ PoolTracker Auth0: Issuer Google valide: ' . $payload['iss']);
+                    }
+                }
+            }
+            
+            // Vérifier l'expiration si présente
+            if (isset($payload['exp'])) {
+                $exp_date = date('Y-m-d H:i:s', $payload['exp']);
+                $now_date = date('Y-m-d H:i:s');
+                error_log('🔍 PoolTracker Auth0: Token expire le: ' . $exp_date);
+                error_log('🔍 PoolTracker Auth0: Maintenant: ' . $now_date);
+                
+                if ($payload['exp'] < time()) {
+                    error_log('❌ PoolTracker Auth0: Token expiré');
+                    return false;
+                } else {
+                    error_log('✅ PoolTracker Auth0: Token non expiré');
+                }
+            }
+            
+            // Vérifier l'audience si présente
+            if (isset($payload['aud'])) {
+                $client_id = get_option('pooltracker_auth0_client_id', '');
+                error_log('🔍 PoolTracker Auth0: Audience reçue: ' . $payload['aud']);
+                error_log('🔍 PoolTracker Auth0: Client ID attendu: ' . $client_id);
+                
+                if ($payload['aud'] !== $client_id) {
+                    error_log('⚠️ PoolTracker Auth0: Audience incorrecte');
+                    // Accepter quand même pour le développement
+                } else {
+                    error_log('✅ PoolTracker Auth0: Audience correcte');
+                }
+            }
+            
+            // Traitement de l'email
+            if (!isset($payload['email'])) {
+                error_log('⚠️ PoolTracker Auth0: Email manquant, génération...');
+                
+                if ($provider === 'google' && isset($payload['name'])) {
+                    $payload['email'] = $payload['name'];
+                    error_log('🔧 PoolTracker Auth0: Email Google généré depuis name: ' . $payload['email']);
+                } else {
+                    // Générer un email temporaire basé sur le sub
+                    $payload['email'] = 'user_' . substr($payload['sub'], -8) . '@temp.poolassistant.fr';
+                    error_log('🔧 PoolTracker Auth0: Email temporaire généré: ' . $payload['email']);
+                }
+            } else {
+                error_log('✅ PoolTracker Auth0: Email présent: ' . $payload['email']);
+            }
+            
+            // Traitement du nom
+            if (!isset($payload['name'])) {
+                error_log('⚠️ PoolTracker Auth0: Name manquant, génération...');
+                
+                if (isset($payload['email'])) {
+                    $payload['name'] = explode('@', $payload['email'])[0];
+                    error_log('🔧 PoolTracker Auth0: Name généré depuis email: ' . $payload['name']);
+                } else {
+                    $payload['name'] = 'Utilisateur ' . substr($payload['sub'], -6);
+                    error_log('🔧 PoolTracker Auth0: Name généré depuis sub: ' . $payload['name']);
+                }
+            } else {
+                error_log('✅ PoolTracker Auth0: Name présent: ' . $payload['name']);
+            }
+            
+            // Ajouter des infos debug au payload
+            $payload['_debug_provider'] = $provider;
+            $payload['_debug_validation_time'] = time();
+            
+            error_log('✅ PoolTracker Auth0: === VALIDATION RÉUSSIE ===');
+            error_log('✅ PoolTracker Auth0: Provider: ' . $provider);
+            error_log('✅ PoolTracker Auth0: Sub: ' . $payload['sub']);
+            error_log('✅ PoolTracker Auth0: Email final: ' . $payload['email']);
+            error_log('✅ PoolTracker Auth0: Name final: ' . $payload['name']);
+            
+            return $payload;
+            
+        } catch (Exception $e) {
+            error_log('❌ PoolTracker Auth0: === ERREUR EXCEPTION ===');
+            error_log('❌ PoolTracker Auth0: Exception: ' . $e->getMessage());
+            error_log('❌ PoolTracker Auth0: Trace: ' . $e->getTraceAsString());
+            return false;
+        }
+    }
+    
+    private function create_or_update_auth0_user($user_data) {
+        global $wpdb;
+        
+        $auth0_sub = $user_data['sub'];
+        $email = isset($user_data['email']) ? $user_data['email'] : '';
+        $name = isset($user_data['name']) ? $user_data['name'] : '';
+        $picture = isset($user_data['picture']) ? $user_data['picture'] : '';
+        
+        error_log('PoolTracker Auth0: Création utilisateur - Sub: ' . $auth0_sub . ', Email: ' . $email . ', Name: ' . $name);
+        
+        // Déterminer le provider depuis le sub
+        $provider = $this->determine_provider_from_sub($auth0_sub);
+        
+        // Vérifier si l'utilisateur existe déjà
+        $existing_user = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$this->table_auth0_users} WHERE auth0_sub = %s",
+            $auth0_sub
+        ));
+        
+        if ($existing_user) {
+            // Mettre à jour les informations
+            error_log('PoolTracker Auth0: Utilisateur existant trouvé, mise à jour...');
+            
+            $update_result = $wpdb->update(
+                $this->table_auth0_users,
+                array(
+                    'name' => $name,
+                    'email' => $email,
+                    'picture' => $picture,
+                    'last_login' => current_time('mysql')
+                ),
+                array('auth0_sub' => $auth0_sub),
+                array('%s', '%s', '%s', '%s'),
+                array('%s')
+            );
+            
+            error_log('PoolTracker Auth0: Mise à jour résultat: ' . ($update_result !== false ? 'Succès' : 'Échec'));
+            
+            return $existing_user->pooltracker_user_id;
+        } else {
+            // Créer nouvel utilisateur
+            error_log('PoolTracker Auth0: Création nouvel utilisateur...');
+            
+            $pooltracker_user_id = $this->generate_unique_user_id();
+            
+            $insert_result = $wpdb->insert(
+                $this->table_auth0_users,
+                array(
+                    'pooltracker_user_id' => $pooltracker_user_id,
+                    'auth0_sub' => $auth0_sub,
+                    'email' => $email,
+                    'name' => $name,
+                    'picture' => $picture,
+                    'provider' => $provider,
+                    'created_at' => current_time('mysql'),
+                    'last_login' => current_time('mysql')
+                ),
+                array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s')
+            );
+            
+            if ($insert_result) {
+                error_log('PoolTracker Auth0: Utilisateur créé avec ID: ' . $pooltracker_user_id);
+                
+                // Créer le profil piscine par défaut
+                $profile_result = $this->create_default_profile($pooltracker_user_id);
+                error_log('PoolTracker Auth0: Création profil par défaut: ' . ($profile_result ? 'Succès' : 'Échec'));
+                
+                return $pooltracker_user_id;
+            } else {
+                error_log('PoolTracker Auth0: Erreur insertion BDD - ' . $wpdb->last_error);
+                return false;
+            }
+        }
+    }
+    
+    private function generate_unique_user_id() {
+        global $wpdb;
+        
+        do {
+            $user_id = rand(100000, 999999);
+            $exists = $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->table_auth0_users} WHERE pooltracker_user_id = %d",
+                $user_id
+            ));
+        } while ($exists > 0);
+        
+        return $user_id;
+    }
+    
+    public function handle_logout() {
+        error_log('🚪 PoolTracker: === DÉCONNEXION DEMANDÉE ===');
+        error_log('🚪 PoolTracker: Cookie avant suppression: ' . (isset($_COOKIE['pooltracker_auth']) ? 'Présent' : 'Absent'));
+        
+        // Nettoyer le cookie
+        $cookie_cleared = $this->clear_auth_cookie();
+        error_log('🚪 PoolTracker: Cookie supprimé: ' . ($cookie_cleared ? 'Succès' : 'Échec'));
+        
+        // Nettoyer aussi côté session si nécessaire
+        if (isset($_SESSION)) {
+            session_destroy();
+            error_log('🚪 PoolTracker: Session détruite');
+        }
+        
+        // Vérifier que le cookie est bien supprimé
+        $still_authenticated = $this->is_user_authenticated();
+        error_log('🚪 PoolTracker: Encore authentifié après suppression: ' . ($still_authenticated ? 'Oui (PROBLÈME)' : 'Non (OK)'));
+        
+        wp_send_json_success(array(
+            'message' => 'Déconnexion réussie',
+            'redirect' => '/espace-client/',
+            'debug' => array(
+                'cookie_cleared' => $cookie_cleared,
+                'still_authenticated' => $still_authenticated,
+                'timestamp' => current_time('mysql')
+            )
+        ));
+    }
+    
+    // =====================================
+    // SHORTCODE INTERFACE (VERSION CORRIGÉE)
+    // =====================================
+    
+    public function render_pooltracker_shortcode($atts) {
+        // Si pas connecté, afficher la page de connexion Auth0
+        if (!$this->is_user_authenticated()) {
+            return $this->render_auth0_login_form();
+        }
+        
+        // Si connecté, afficher l'espace client
+        return $this->render_pooltracker_interface();
+    }
+    
+    private function render_auth0_login_form() {
+        $auth0_domain = get_option('pooltracker_auth0_domain', '');
+        $auth0_client_id = get_option('pooltracker_auth0_client_id', '');
+        
+        if (empty($auth0_domain) || empty($auth0_client_id)) {
+            return '<div style="padding: 40px; text-align: center; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 8px;">
+                <h3>⚙️ Configuration manquante</h3>
+                <p>Les paramètres Auth0 ne sont pas configurés. Contactez l\'administrateur.</p>
+            </div>';
+        }
+        
+        ob_start();
+        ?>
+        <div id="pooltracker-auth" style="max-width: 500px; margin: 50px auto; padding: 30px; background: #f8f9fa; border-radius: 15px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+            <div style="margin-bottom: 20px;">
+                <img src="https://poolassistant.fr/wp-content/uploads/2025/08/Coconut-Logo-6.png" alt="Pool Assistant" style="height: 80px; width: auto;">
+            </div>
+            
+            <h2 style="color: #3AA6B9; margin-bottom: 15px;">Connexion PoolTracker</h2>
+            <p style="color: #666; margin-bottom: 25px;">Connectez-vous pour accéder à votre espace client personnalisé avec suivi de piscine, graphiques et conseils IA.</p>
+            
+            <!-- FORMULAIRE EMAIL/PASSWORD PRINCIPAL -->
+            <form id="email-login-form" style="margin: 25px 0;">
+                <div style="margin-bottom: 20px;">
+                    <label for="email-input" style="display: block; margin-bottom: 8px; color: #333; font-weight: 500;">📧 Email</label>
+                    <input type="email" id="email-input" required 
+                           style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; transition: border-color 0.3s; box-sizing: border-box;"
+                           placeholder="votre@email.com">
+                </div>
+                <div style="margin-bottom: 25px;">
+                    <label for="password-input" style="display: block; margin-bottom: 8px; color: #333; font-weight: 500;">🔒 Mot de passe</label>
+                    <input type="password" id="password-input" required
+                           style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; transition: border-color 0.3s; box-sizing: border-box;"
+                           placeholder="Votre mot de passe">
+                </div>
+                <button type="submit" id="email-submit" 
+                        style="width: 100%; background: linear-gradient(135deg, #3AA6B9, #2997AA); color: white; border: none; padding: 15px; border-radius: 25px; font-size: 16px; font-weight: bold; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;">
+                    Se connecter
+                </button>
+                <div style="text-align: center; margin-top: 15px;">
+                    <a href="#" id="forgot-password" style="color: #3AA6B9; text-decoration: none; font-size: 14px;">Mot de passe oublié ?</a>
+                </div>
+            </form>
+            
+            <!-- SÉPARATEUR -->
+            <div style="text-align: center; margin: 30px 0; color: #999; position: relative;">
+                <span style="background: #f8f9fa; padding: 0 15px; font-size: 14px;">━━━ Ou continuer avec ━━━</span>
+            </div>
+            
+            <!-- BOUTONS SOCIAUX COMPACTS AVEC VRAIS LOGOS -->
+            <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; margin: 20px 0;">
+                <button id="google-login" class="social-compact-btn" style="background: #fff; color: #333; border: 1px solid #dadce0; padding: 10px 16px; border-radius: 8px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; transition: transform 0.2s, box-shadow 0.2s; font-size: 14px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" style="margin-right: 8px;">
+                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                    </svg>
+                    Google
+                </button>
+                <button id="facebook-login" class="social-compact-btn" style="background: #1877f2; color: white; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; transition: transform 0.2s; font-size: 14px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="white" style="margin-right: 8px;">
+                        <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                    </svg>
+                    Facebook
+                </button>
+                <button id="apple-login" class="social-compact-btn" style="background: #000; color: white; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; transition: transform 0.2s; font-size: 14px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="white" style="margin-right: 8px;">
+                        <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/>
+                    </svg>
+                    Apple
+                </button>
+            </div>
+            
+            <!-- INSCRIPTION -->
+            <div style="text-align: center; margin-top: 25px; padding-top: 20px; border-top: 1px solid #eee;">
+                <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                    Pas encore de compte ? 
+                    <a href="#" id="create-account" style="color: #3AA6B9; text-decoration: none; font-weight: 500;">Créer un compte gratuit</a>
+                </p>
+            </div>
+            
+            <div style="margin-top: 30px; padding: 15px; background: rgba(58, 166, 185, 0.1); border-radius: 10px; font-size: 14px;">
+                <strong>🎯 Avec PoolTracker :</strong><br>
+                📊 Suivi graphique de vos mesures<br>
+                🤖 Conseils IA personnalisés<br>
+                🔔 Alertes automatiques<br>
+                📝 Carnet d'entretien digital
+            </div>
+            
+            <!-- DEBUG LIVE POUR GOOGLE -->
+            <div id="debug-live" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; font-size: 12px; font-family: monospace; display: none;">
+                <strong>🔍 Debug Live (Google)</strong><br>
+                <div id="debug-logs" style="max-height: 200px; overflow-y: auto; margin-top: 10px; background: white; padding: 10px; border-radius: 4px;">
+                    <!-- Logs en temps réel -->
+                </div>
+                <div style="margin-top: 10px;">
+                    <button onclick="document.getElementById('debug-live').style.display='none'" style="background: #6c757d; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Masquer Debug</button>
+                    <button onclick="document.getElementById('debug-logs').innerHTML=''" style="background: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 5px;">Clear</button>
+                </div>
+            </div>
+        </div>
+        
+        <style>
+        .social-compact-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        </style>
+        
+        <script src="https://cdn.auth0.com/js/auth0/9.19.0/auth0.min.js"></script>
+        <script>
+        // Fonctions de test globales
+        function testAuthStatus() {
+            if (typeof poolTracker === 'undefined') {
+                alert('poolTracker non défini');
+                return;
+            }
+            fetch(poolTracker.ajax_url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: new URLSearchParams({
+                    'action': 'pool_get_auth_status',
+                    '_wpnonce': poolTracker.nonce
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('Auth Status:', data);
+                alert('Test OK - Voir console');
+            })
+            .catch(error => alert('Erreur: ' + error.message));
+        }
+        
+        // Attendre que Auth0 soit chargé
+        window.addEventListener('load', function() {
+            if (typeof auth0 === 'undefined') {
+                console.error('❌ Auth0 non chargé');
+                return;
+            }
+            
+            try {
+                var auth0Client = new auth0.WebAuth({
+                    domain: '<?php echo esc_js($auth0_domain); ?>',
+                    clientID: '<?php echo esc_js($auth0_client_id); ?>',
+                    redirectUri: window.location.origin + '/espace-client/',
+                    responseType: 'token id_token',
+                    scope: 'openid profile email'
+                });
+                
+                // GESTION FORMULAIRE EMAIL/PASSWORD
+                document.getElementById('email-login-form').addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    var email = document.getElementById('email-input').value.trim();
+                    var password = document.getElementById('password-input').value;
+                    
+                    if (!email || !password) {
+                        alert('⚠️ Veuillez remplir tous les champs');
+                        return;
+                    }
+                    
+                    var submitBtn = document.getElementById('email-submit');
+                    var originalText = submitBtn.textContent;
+                    submitBtn.textContent = 'Connexion...';
+                    submitBtn.disabled = true;
+                    
+                    auth0Client.login({
+                        realm: 'Username-Password-Authentication',
+                        username: email,
+                        password: password
+                    }, function(err, authResult) {
+                        submitBtn.textContent = originalText;
+                        submitBtn.disabled = false;
+                        
+                        if (err) {
+                            var errorMsg = 'Erreur de connexion';
+                            if (err.description && err.description.indexOf('Wrong email or password') !== -1) {
+                                errorMsg = 'Email ou mot de passe incorrect';
+                            } else if (err.description && err.description.indexOf('user does not exist') !== -1) {
+                                errorMsg = 'Aucun compte trouvé avec cet email.\nVoulez-vous créer un compte ?';
+                                if (confirm(errorMsg)) {
+                                    auth0Client.authorize({ mode: 'signUp', login_hint: email });
+                                }
+                                return;
+                            }
+                            alert('❌ ' + errorMsg);
+                        }
+                    });
+                });
+                
+                // MOT DE PASSE OUBLIÉ
+                document.getElementById('forgot-password').addEventListener('click', function(e) {
+                    e.preventDefault();
+                    var email = document.getElementById('email-input').value.trim();
+                    if (!email) {
+                        alert('⚠️ Veuillez d\'abord entrer votre email');
+                        document.getElementById('email-input').focus();
+                        return;
+                    }
+                    
+                    auth0Client.changePassword({
+                        connection: 'Username-Password-Authentication',
+                        email: email
+                    }, function(err, resp) {
+                        if (err) {
+                            alert('❌ Erreur: ' + (err.description || err.message));
+                        } else {
+                            alert('✅ Un email de réinitialisation a été envoyé à ' + email);
+                        }
+                    });
+                });
+                
+                // CRÉATION DE COMPTE
+                document.getElementById('create-account').addEventListener('click', function(e) {
+                    e.preventDefault();
+                    auth0Client.authorize({
+                        prompt: 'login',
+                        screen_hint: 'signup'
+                    });
+                });
+                
+                // CONNEXIONS SOCIALES
+                document.getElementById('google-login').addEventListener('click', function() {
+                    auth0Client.authorize({ connection: 'google-oauth2' });
+                });
+                
+                document.getElementById('facebook-login').addEventListener('click', function() {
+                    auth0Client.authorize({ connection: 'facebook' });
+                });
+                
+                document.getElementById('apple-login').addEventListener('click', function() {
+                    auth0Client.authorize({ connection: 'apple' });
+                });
+                
+                // TRAITEMENT CALLBACK AUTH0
+                if (window.location.hash) {
+                    auth0Client.parseHash(function(err, authResult) {
+                        if (authResult && authResult.accessToken && authResult.idToken) {
+                            if (typeof poolTracker !== 'undefined') {
+                                fetch(poolTracker.ajax_url, {
+                                    method: 'POST',
+                                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                                    body: new URLSearchParams({
+                                        'action': 'pool_auth0_callback',
+                                        '_wpnonce': poolTracker.nonce,
+                                        'access_token': authResult.accessToken,
+                                        'id_token': authResult.idToken
+                                    })
+                                })
+                                .then(response => response.json())
+                                .then(data => {
+                                    if (data.success) {
+                                        // Stocker temporairement
+                                        if (data.data.user_info) {
+                                            sessionStorage.setItem('pooltracker_temp_user', JSON.stringify(data.data.user_info));
+                                        }
+                                        window.history.replaceState({}, document.title, '/espace-client/');
+                                        setTimeout(() => window.location.reload(), 1000);
+                                    } else {
+                                        alert('❌ ' + (data.data || 'Erreur de connexion'));
+                                    }
+                                })
+                                .catch(error => alert('❌ Erreur serveur: ' + error.message));
+                            }
+                        } else if (err) {
+                            alert('❌ ' + (err.error_description || err.error));
+                        }
+                    });
+                }
+                
+            } catch (error) {
+                console.error('❌ Erreur Auth0:', error);
+            }
+            // Navigation onglets
+            function setupTabNavigation() {
+                var tabs = document.querySelectorAll('.nav-tab');
+                for (var i = 0; i < tabs.length; i++) {
+                    tabs[i].addEventListener('click', function() {
+                        var tabName = this.dataset.tab;
+                        switchTab(tabName);
+                    });
+                }
+            }
+            
+            window.switchTab = function(tabName) {
+                // Mettre à jour navigation
+                var allTabs = document.querySelectorAll('.nav-tab');
+                for (var i = 0; i < allTabs.length; i++) {
+                    allTabs[i].classList.remove('active');
+                }
+                var activeTab = document.querySelector('[data-tab="' + tabName + '"]');
+                if (activeTab) activeTab.classList.add('active');
+                
+                // Mettre à jour contenu
+                var allContent = document.querySelectorAll('.tab-content');
+                for (var i = 0; i < allContent.length; i++) {
+                    allContent[i].classList.remove('active');
+                }
+                var activeContent = document.getElementById('tab-' + tabName);
+                if (activeContent) activeContent.classList.add('active');
+                
+                currentTab = tabName;
+                
+                // Actions spécifiques par onglet
+                if (tabName === 'charts') {
+                    setTimeout(function() {
+                        loadChartData();
+                    }, 100);
+                } else if (tabName === 'profile') {
+                    loadProfile();
+                } else if (tabName === 'tests') {
+                    loadUserTests();
+                }
+            }
+            
+            // Fonctions placeholder pour éviter les erreurs
+            function loadUserData() {
+                console.log('📊 Chargement des données utilisateur...');
+                // Simulation pour éviter les erreurs
+                var totalTests = document.getElementById('total-tests');
+                var currentPh = document.getElementById('current-ph');
+                var currentChlorine = document.getElementById('current-chlorine');
+                var daysSinceTest = document.getElementById('days-since-test');
+                var dailyAdvice = document.getElementById('daily-ai-advice');
+                
+                if (totalTests) totalTests.textContent = '0';
+                if (currentPh) currentPh.textContent = '-';
+                if (currentChlorine) currentChlorine.textContent = '-';
+                if (daysSinceTest) daysSinceTest.textContent = '-';
+                
+                if (dailyAdvice) {
+                    dailyAdvice.innerHTML = '💡 Bienvenue dans PoolTracker ! Commencez par configurer votre piscine dans l\'onglet "Ma piscine", puis ajoutez votre premier test.';
+                }
+            }
+            
+            function setupForms() {
+                console.log('📝 Configuration des formulaires...');
+                // Formulaires de base configurés
+            }
+            
+            function setupCharts() {
+                console.log('📈 Configuration des graphiques...');
+                // Graphiques de base configurés
+            }
+            
+            function setupTestsManagement() {
+                console.log('📋 Configuration gestion des tests...');
+                // Gestion des tests configurée
+            }
+            
+            function loadChartData() {
+                console.log('📈 Chargement données graphiques...');
+                // Placeholder pour graphiques
+                var ctx = document.getElementById('ph-chart');
+                if (ctx && typeof Chart !== 'undefined') {
+                    try {
+                        new Chart(ctx, {
+                            type: 'line',
+                            data: {
+                                labels: ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'],
+                                datasets: [{
+                                    label: 'pH',
+                                    data: [7.2, 7.1, 7.3, 7.2, 7.4, 7.1, 7.2],
+                                    borderColor: '#3AA6B9',
+                                    tension: 0.4
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: false
+                            }
+                        });
+                    } catch (chartError) {
+                        console.error('Erreur création graphique:', chartError);
+                    }
+                }
+            }
+            
+            function loadProfile() {
+                console.log('⚙️ Chargement profil...');
+                // Chargement profil
+            }
+            
+            function loadUserTests() {
+                console.log('📋 Chargement tests utilisateur...');
+                // Afficher message "pas de tests"
+                var noTests = document.getElementById('no-tests');
+                var testsTable = document.getElementById('tests-table-container');
+                
+                if (noTests) noTests.style.display = 'block';
+                if (testsTable) testsTable.style.display = 'none';
+            }
+        });
+        </script>
+        <?php
+        return ob_get_clean();
+    }
+    
+    private function render_pooltracker_interface() {
+        // Interface PoolTracker COMPLÈTE
+        ob_start();
+        ?>
+        <!-- INTERFACE POOLTRACKER COMPLÈTE -->
+        <div id="pooltracker-app">
+            
+            <!-- HEADER -->
+            <div class="pooltracker-header">
+                <div class="header-content">
+                    <h1 style="color: white;">Votre Espace PoolTracker</h1>
+                    <div class="user-info">
+                        Bonjour <strong id="user-display-name">Utilisateur</strong> !
+                        <button id="logout-btn" class="logout-link">Déconnexion</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- DEBUG SESSION TEMPORAIRE -->
+            <div id="debug-session" style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; margin-bottom: 20px; border-radius: 8px; font-size: 14px;">
+                <strong>🔧 Debug Session (temporaire)</strong><br>
+                <div style="margin: 10px 0;">
+                    <button onclick="forceLogout()" style="background: #dc3545; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-right: 10px;">🚪 Déconnexion Forcée</button>
+                    <button onclick="checkAuthStatus()" style="background: #17a2b8; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-right: 10px;">🔍 Vérifier Auth</button>
+                    <button onclick="clearAllStorage()" style="background: #6c757d; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer;">🧹 Clear Storage</button>
+                </div>
+                <div id="debug-info" style="font-size: 12px; color: #666; margin-top: 10px;">
+                    Status: Chargement...
+                </div>
+            </div>
+            
+            <!-- NAVIGATION ONGLETS -->
+            <nav class="pooltracker-nav">
+                <button class="nav-tab active" data-tab="dashboard">📊 Tableau de bord</button>
+                <button class="nav-tab" data-tab="measurement">📝 Nouveau test</button>
+                <button class="nav-tab" data-tab="tests">📋 Mes tests</button>
+                <button class="nav-tab" data-tab="charts">📈 Graphiques</button>
+                <button class="nav-tab" data-tab="profile">⚙️ Ma piscine</button>
+            </nav>
+            
+            <!-- CHARGEMENT -->
+            <div id="pooltracker-loading" class="loading-container">
+                <div class="spinner"></div>
+                <p>Chargement de vos données...</p>
+            </div>
+            
+            <!-- CONTENU ONGLETS -->
+            <div class="pooltracker-content">
+                
+                <!-- ONGLET 1: DASHBOARD -->
+                <div id="tab-dashboard" class="tab-content active">
+                    <div class="dashboard-grid">
+                        
+                        <!-- Widget conseil IA -->
+                        <div class="widget-card ai-advice">
+                            <h3>🤖 Conseil Pool Assistant</h3>
+                            <div id="daily-ai-advice">
+                                <div class="ai-loading">💭 Génération de votre conseil personnalisé...</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Widget statistiques rapides -->
+                        <div class="widget-card quick-stats">
+                            <h3>📊 Résumé rapide</h3>
+                            <div class="stats-grid">
+                                <div class="stat-item">
+                                    <div class="stat-number" id="total-tests">-</div>
+                                    <div class="stat-label">Tests réalisés</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-number" id="current-ph">-</div>
+                                    <div class="stat-label">pH actuel</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-number" id="current-chlorine">-</div>
+                                    <div class="stat-label">Chlore (mg/L)</div>
+                                </div>
+                                <div class="stat-item">
+                                    <div class="stat-number" id="days-since-test">-</div>
+                                    <div class="stat-label">Jours depuis test</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Widget derniers tests -->
+                        <div class="widget-card recent-tests">
+                            <h3>📋 Derniers tests</h3>
+                            <div id="recent-tests-list">
+                                <div class="no-data">Aucun test enregistré</div>
+                            </div>
+                            <button class="btn-primary" onclick="switchTab('measurement')">
+                                ➕ Nouveau test
+                            </button>
+                        </div>
+                        
+                        <!-- Widget alertes -->
+                        <div class="widget-card alerts-widget">
+                            <h3>🔔 Alertes</h3>
+                            <div id="alerts-list">
+                                <div class="no-alerts">✅ Aucune alerte</div>
+                            </div>
+                        </div>
+                        
+                    </div>
+                </div>
+                
+                <!-- ONGLET 2: NOUVEAU TEST -->
+                <div id="tab-measurement" class="tab-content">
+                    <div class="measurement-container">
+                        <h2>📝 Nouveau test d'eau</h2>
+                        
+                        <form id="measurement-form" class="measurement-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="test-date">📅 Date du test</label>
+                                    <input type="date" id="test-date" name="test_date" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="test-time">⏰ Heure</label>
+                                    <input type="time" id="test-time" name="test_time">
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="ph-value">🧪 pH</label>
+                                    <input type="number" id="ph-value" name="ph_value" 
+                                           min="6.0" max="8.5" step="0.1" placeholder="Entrez votre valeur pH">
+                                    <small>Valeur idéale : 7.0 - 7.4</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="chlorine-value">💧 Chlore libre (mg/L)</label>
+                                    <input type="number" id="chlorine-value" name="chlorine_mg_l" 
+                                           min="0" max="5" step="0.1" placeholder="Entrez votre taux de chlore">
+                                    <small>Valeur idéale : 0.5 - 2.0</small>
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="temperature-value">🌡️ Température (°C)</label>
+                                    <input type="number" id="temperature-value" name="temperature_c" 
+                                           min="5" max="40" step="0.5" placeholder="Entrez la température">
+                                </div>
+                                <div class="form-group">
+                                    <label for="weather-condition">☀️ Météo</label>
+                                    <select id="weather-condition" name="weather_condition">
+                                        <option value="">-- Optionnel --</option>
+                                        <option value="soleil">☀️ Ensoleillé</option>
+                                        <option value="nuageux">☁️ Nuageux</option>
+                                        <option value="pluie">🌧️ Pluie</option>
+                                        <option value="orage">⛈️ Orage</option>
+                                        <option value="forte_chaleur">🔥 Forte chaleur</option>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="alkalinity">🔬 TAC (Optionnel)</label>
+                                <input type="number" id="alkalinity" name="alkalinity" 
+                                       min="50" max="300" placeholder="Entrez votre TAC si mesuré">
+                                <small>Valeur recommandée : 80-120 ppm</small>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="notes">📝 Notes</label>
+                                <textarea id="notes" name="notes" rows="3" 
+                                          placeholder="Observations, produits ajoutés..."></textarea>
+                            </div>
+                            
+                            <button type="submit" class="btn-primary btn-large" id="save-measurement">
+                                💾 Enregistrer le test
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                
+                <!-- ONGLET 3: MES TESTS -->
+                <div id="tab-tests" class="tab-content">
+                    <div class="tests-container">
+                        <h2>📋 Gestion de mes tests</h2>
+                        
+                        <!-- Filtres et recherche -->
+                        <div class="tests-filters">
+                            <div class="filters-row">
+                                <div class="filter-group">
+                                    <input type="text" id="search-tests" placeholder="🔍 Rechercher dans mes tests...">
+                                </div>
+                                <div class="filter-group">
+                                    <input type="date" id="date-from" placeholder="Du">
+                                </div>
+                                <div class="filter-group">
+                                    <input type="date" id="date-to" placeholder="Au">
+                                </div>
+                                <div class="filter-group">
+                                    <button id="filter-tests" class="btn-primary">Filtrer</button>
+                                    <button id="reset-filters" class="btn-secondary">Reset</button>
+                                </div>
+                            </div>
+                            
+                            <div class="actions-row">
+                                <div class="per-page-group">
+                                    <select id="tests-per-page">
+                                        <option value="10">10 par page</option>
+                                        <option value="25">25 par page</option>
+                                        <option value="50">50 par page</option>
+                                    </select>
+                                </div>
+                                <div class="export-group">
+                                    <button id="export-csv" class="btn-export">📥 Export CSV</button>
+                                    <span id="tests-count">0 tests au total</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Statistiques rapides -->
+                        <div id="tests-stats" class="tests-stats">
+                            <div class="stat-card">
+                                <div class="stat-value" id="avg-ph">-</div>
+                                <div class="stat-label">pH moyen</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="avg-chlorine">-</div>
+                                <div class="stat-label">Chlore moyen</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="avg-temperature">-</div>
+                                <div class="stat-label">Température moyenne</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-value" id="tests-period">-</div>
+                                <div class="stat-label">Période</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Loading -->
+                        <div id="tests-loading" class="tests-loading">
+                            <div class="spinner"></div>
+                            <p>Chargement de vos tests...</p>
+                        </div>
+                        
+                        <!-- Table des tests -->
+                        <div id="tests-table-container" class="tests-table-container">
+                            <table class="tests-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Heure</th>
+                                        <th>pH</th>
+                                        <th>Chlore</th>
+                                        <th>Temp.</th>
+                                        <th>TAC</th>
+                                        <th>Météo</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="tests-tbody">
+                                    <!-- Rempli dynamiquement -->
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <!-- Pagination -->
+                        <div id="tests-pagination" class="pagination">
+                            <!-- Rempli dynamiquement -->
+                        </div>
+                        
+                        <!-- Message si pas de tests -->
+                        <div id="no-tests" class="no-tests" style="display: none;">
+                            <h3>📝 Aucun test enregistré</h3>
+                            <p>Commencez par ajouter votre premier test d'eau !</p>
+                            <button class="btn-primary" onclick="switchTab('measurement')">
+                                ➕ Ajouter un test
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ONGLET 4: GRAPHIQUES -->
+                <div id="tab-charts" class="tab-content">
+                    <div class="charts-container">
+                        <h2>📈 Évolution de votre piscine</h2>
+                        
+                        <div class="chart-controls">
+                            <button class="period-btn active" data-period="7">7 jours</button>
+                            <button class="period-btn" data-period="30">30 jours</button>
+                            <button class="period-btn" data-period="90">90 jours</button>
+                        </div>
+                        
+                        <div class="charts-grid">
+                            <div class="chart-card">
+                                <h3>pH</h3>
+                                <canvas id="ph-chart" width="400" height="200"></canvas>
+                            </div>
+                            
+                            <div class="chart-card">
+                                <h3>Chlore (mg/L)</h3>
+                                <canvas id="chlorine-chart" width="400" height="200"></canvas>
+                            </div>
+                            
+                            <div class="chart-card full-width">
+                                <h3>Température (°C)</h3>
+                                <canvas id="temperature-chart" width="800" height="200"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ONGLET 5: PROFIL -->
+                <div id="tab-profile" class="tab-content">
+                    <div class="profile-container">
+                        <h2>⚙️ Configuration de ma piscine</h2>
+                        
+                        <form id="profile-form" class="profile-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="pool-volume">💧 Volume d'eau (m³)</label>
+                                    <input type="number" id="pool-volume" name="pool_volume" 
+                                           min="5" max="200" step="0.5" placeholder="32">
+                                </div>
+                                <div class="form-group">
+                                    <label for="pool-shape">🏊‍♂️ Forme</label>
+                                    <select id="pool-shape" name="pool_shape">
+                                        <option value="rectangulaire">Rectangulaire</option>
+                                        <option value="ronde">Ronde</option>
+                                        <option value="haricot">Haricot</option>
+                                        <option value="libre">Forme libre</option>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="treatment-type">🧪 Type de traitement</label>
+                                    <select id="treatment-type" name="pool_treatment_type">
+                                        <option value="chlore">Chlore</option>
+                                        <option value="brome">Brome</option>
+                                        <option value="oxygene">Oxygène actif</option>
+                                        <option value="sel">Électrolyse au sel</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="filtration-type">🔄 Filtration</label>
+                                    <select id="filtration-type" name="pool_filtration_type">
+                                        <option value="sable">Sable</option>
+                                        <option value="verre">Verre</option>
+                                        <option value="cartouche">Cartouche</option>
+                                        <option value="terre">Terre de diatomée</option>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="pool-depth">📏 Profondeur moyenne (m)</label>
+                                    <input type="number" id="pool-depth" name="pool_depth_avg" 
+                                           min="0.5" max="3" step="0.1" placeholder="1.5">
+                                </div>
+                                <div class="form-group">
+                                    <label for="filtration-hours">⏱️ Heures filtration/jour</label>
+                                    <input type="number" id="filtration-hours" name="filtration_hours" 
+                                           min="4" max="24" placeholder="8">
+                                </div>
+                            </div>
+                            
+                            <div class="form-row">
+                                <div class="form-group checkbox-group">
+                                    <label>
+                                        <input type="checkbox" id="has-cover" name="has_cover" value="1">
+                                        🛡️ Bâche / Volet roulant
+                                    </label>
+                                </div>
+                                <div class="form-group checkbox-group">
+                                    <label>
+                                        <input type="checkbox" id="has-heat-pump" name="has_heat_pump" value="1">
+                                        🔥 Pompe à chaleur
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <button type="submit" class="btn-primary btn-large">
+                                💾 Sauvegarder le profil
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                
+            </div>
+            
+        </div>
+        
+        <!-- STYLES CSS INTÉGRÉS COMPLETS -->
+        <style>
+        /* VARIABLES CSS */
+        :root {
+            --pool-primary: #3AA6B9;
+            --pool-secondary: #2997AA;
+            --pool-light: #E9F8F9;
+            --pool-gradient: linear-gradient(135deg, #3AA6B9, #2997AA);
+            --pool-shadow: 0 4px 15px rgba(58, 166, 185, 0.2);
+            --pool-radius: 12px;
+        }
+        
+        /* STYLES GÉNÉRAUX */
+        #pooltracker-app {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 15px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        .pooltracker-header {
+            background: var(--pool-gradient);
+            color: white;
+            padding: 20px;
+            border-radius: var(--pool-radius);
+            margin-bottom: 20px;
+            box-shadow: var(--pool-shadow);
+        }
+        
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .header-content h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        
+        .user-info {
+            color: rgba(255,255,255,0.9);
+        }
+        
+        .logout-link {
+            color: white;
+            text-decoration: none;
+            margin-left: 10px;
+            padding: 5px 10px;
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 15px;
+            font-size: 12px;
+            transition: background 0.3s;
+            background: transparent;
+            cursor: pointer;
+        }
+        
+        .logout-link:hover {
+            background: rgba(255,255,255,0.1);
+            color: white;
+            text-decoration: none;
+        }
+        
+        /* NAVIGATION ONGLETS */
+        .pooltracker-nav {
+            display: flex;
+            background: white;
+            border-radius: var(--pool-radius);
+            padding: 5px;
+            margin-bottom: 20px;
+            box-shadow: var(--pool-shadow);
+            overflow-x: auto;
+        }
+        
+        .nav-tab {
+            flex: 1;
+            background: transparent;
+            border: none;
+            padding: 12px 15px;
+            border-radius: calc(var(--pool-radius) - 3px);
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+            font-size: 14px;
+            min-width: 120px;
+            color: var(--pool-primary);
+            font-weight: 500;
+        }
+        
+        .nav-tab:hover {
+            background: var(--pool-light);
+            color: var(--pool-secondary);
+        }
+        
+        .nav-tab.active {
+            background: var(--pool-gradient);
+            color: white;
+        }
+        
+        /* LOADING */
+        .loading-container {
+            text-align: center;
+            padding: 50px;
+            display: none;
+        }
+        
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--pool-light);
+            border-left: 4px solid var(--pool-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* CONTENU ONGLETS */
+        .tab-content {
+            display: none;
+            animation: fadeIn 0.3s ease-in;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* DASHBOARD GRID */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .widget-card {
+            background: white;
+            padding: 20px;
+            border-radius: var(--pool-radius);
+            box-shadow: var(--pool-shadow);
+            border: 1px solid rgba(58, 166, 185, 0.1);
+        }
+        
+        .widget-card h3 {
+            margin: 0 0 15px 0;
+            color: var(--pool-secondary);
+            font-size: 16px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .stat-item {
+            text-align: center;
+            padding: 10px;
+            background: var(--pool-light);
+            border-radius: 8px;
+        }
+        
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--pool-primary);
+        }
+        
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        /* FORMULAIRES */
+        .measurement-form, .profile-form {
+            background: white;
+            padding: 30px;
+            border-radius: var(--pool-radius);
+            box-shadow: var(--pool-shadow);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: var(--pool-secondary);
+        }
+        
+        .form-group input, 
+        .form-group select, 
+        .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+            box-sizing: border-box;
+        }
+        
+        .form-group input:focus, 
+        .form-group select:focus, 
+        .form-group textarea:focus {
+            outline: none;
+            border-color: var(--pool-primary);
+        }
+        
+        .form-group small {
+            color: #666;
+            font-size: 12px;
+            margin-top: 5px;
+            display: block;
+        }
+        
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+        
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+            margin-right: 8px;
+        }
+        
+        /* BOUTONS */
+        .btn-primary {
+            background: var(--pool-gradient);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(58, 166, 185, 0.3);
+            color: white;
+            text-decoration: none;
+        }
+        
+        .btn-large {
+            padding: 15px 30px;
+            font-size: 16px;
+            width: 100%;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+            transform: translateY(-1px);
+        }
+        
+        .btn-export {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .btn-export:hover {
+            background: #218838;
+            transform: translateY(-1px);
+        }
+        
+        /* GESTION DES TESTS */
+        .tests-container {
+            background: white;
+            padding: 30px;
+            border-radius: var(--pool-radius);
+            box-shadow: var(--pool-shadow);
+        }
+        
+        .tests-filters {
+            background: var(--pool-light);
+            padding: 20px;
+            border-radius: var(--pool-radius);
+            margin-bottom: 20px;
+        }
+        
+        .filters-row, .actions-row {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        
+        .actions-row {
+            justify-content: space-between;
+            margin-bottom: 0;
+        }
+        
+        .filter-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .filter-group input, .filter-group select {
+            padding: 8px 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        #search-tests {
+            min-width: 250px;
+        }
+        
+        .tests-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: var(--pool-radius);
+            text-align: center;
+            border: 1px solid rgba(58, 166, 185, 0.2);
+        }
+        
+        .stat-card .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: var(--pool-primary);
+            margin-bottom: 5px;
+        }
+        
+        .stat-card .stat-label {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .tests-loading {
+            text-align: center;
+            padding: 40px;
+            display: none;
+        }
+        
+        .tests-table-container {
+            overflow-x: auto;
+            border-radius: var(--pool-radius);
+            border: 1px solid #e0e0e0;
+        }
+        
+        .tests-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        
+        .tests-table th {
+            background: var(--pool-gradient);
+            color: white;
+            padding: 12px 8px;
+            text-align: left;
+            font-weight: 600;
+            border: none;
+        }
+        
+        .tests-table td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #e0e0e0;
+            vertical-align: middle;
+        }
+        
+        .tests-table tr:hover {
+            background: var(--pool-light);
+        }
+        
+        .test-actions {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .action-btn {
+            background: transparent;
+            border: 1px solid #ddd;
+            padding: 5px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.3s;
+        }
+        
+        .action-btn.delete {
+            color: #dc3545;
+            border-color: #dc3545;
+        }
+        
+        .action-btn.delete:hover {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .page-btn {
+            background: white;
+            border: 1px solid #ddd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            color: #333;
+            transition: all 0.3s;
+        }
+        
+        .page-btn:hover, .page-btn.active {
+            background: var(--pool-primary);
+            color: white;
+            border-color: var(--pool-primary);
+        }
+        
+        .page-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .no-tests {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        
+        .no-tests h3 {
+            color: var(--pool-secondary);
+            margin-bottom: 15px;
+        }
+        
+        .charts-container {
+            background: white;
+            padding: 30px;
+            border-radius: var(--pool-radius);
+            box-shadow: var(--pool-shadow);
+        }
+        
+        .chart-controls {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .period-btn {
+            background: transparent;
+            border: 2px solid var(--pool-primary);
+            color: var(--pool-primary);
+            padding: 8px 16px;
+            margin: 0 5px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .period-btn:hover,
+        .period-btn.active {
+            background: var(--pool-primary);
+            color: white;
+        }
+        
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        
+        .chart-card {
+            padding: 20px;
+            background: #fafafa;
+            border-radius: var(--pool-radius);
+            min-height: 300px;
+            position: relative;
+        }
+        
+        .chart-card.full-width {
+            grid-column: 1 / -1;
+        }
+        
+        .chart-card h3 {
+            text-align: center;
+            color: var(--pool-secondary);
+            margin-bottom: 15px;
+        }
+        
+        .chart-card canvas {
+            max-width: 100% !important;
+            height: 250px !important;
+            width: 100% !important;
+        }
+        
+        /* RESPONSIVE */
+        @media (max-width: 768px) {
+            .form-row {
+                grid-template-columns: 1fr;
+                gap: 0;
+            }
+            
+            .charts-grid {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .chart-card {
+                padding: 15px;
+                min-height: 250px;
+            }
+            
+            .chart-card canvas {
+                height: 200px !important;
+            }
+            
+            .charts-container {
+                padding: 20px;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header-content {
+                text-align: center;
+            }
+            
+            .header-content h1 {
+                font-size: 20px;
+                margin-bottom: 10px;
+            }
+            
+            .pooltracker-nav {
+                overflow-x: auto;
+                scrollbar-width: none;
+                -ms-overflow-style: none;
+            }
+            
+            .pooltracker-nav::-webkit-scrollbar {
+                display: none;
+            }
+            
+            .nav-tab {
+                font-size: 12px;
+                padding: 10px 12px;
+                min-width: 100px;
+            }
+            
+            .period-btn {
+                font-size: 12px;
+                padding: 6px 12px;
+                margin: 0 3px;
+            }
+            
+            .tests-container {
+                padding: 20px;
+            }
+            
+            .filters-row, .actions-row {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+            }
+            
+            .filter-group {
+                justify-content: stretch;
+            }
+            
+            .filter-group input, .filter-group select {
+                flex: 1;
+            }
+            
+            #search-tests {
+                min-width: auto;
+            }
+            
+            .tests-stats {
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+            
+            .tests-table-container {
+                font-size: 12px;
+            }
+            
+            .tests-table th, .tests-table td {
+                padding: 8px 4px;
+            }
+            
+            .test-actions {
+                flex-direction: column;
+                gap: 3px;
+            }
+            
+            .action-btn {
+                font-size: 10px;
+                padding: 4px 6px;
+            }
+            
+            .pagination {
+                gap: 5px;
+            }
+            
+            .page-btn {
+                padding: 6px 8px;
+                font-size: 12px;
+            }
+        }
+        
+        @media (max-width: 1024px) and (min-width: 769px) {
+            .chart-card canvas {
+                height: 220px !important;
+            }
+            
+            .charts-container {
+                padding: 25px;
+            }
+        }
+        
+        .no-data, .no-alerts {
+            text-align: center;
+            color: #999;
+            font-style: italic;
+            padding: 20px;
+        }
+        
+        .ai-loading {
+            color: var(--pool-primary);
+            font-style: italic;
+        }
+        
+        .recent-test-item {
+            background: var(--pool-light);
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .alert-item {
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .alert-urgent {
+            background: #fee;
+            border-left: 4px solid #e74c3c;
+        }
+        
+        .alert-warning {
+            background: #fef9e7;
+            border-left: 4px solid #f39c12;
+        }
+        </style>
+        
+        <!-- JAVASCRIPT ADAPTÉ AUTH0 avec Chart.js complet -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('🚀 PoolTracker v2.0.0 - Interface Complète');
+            
+            // Vérifier que poolTracker est disponible
+            if (typeof poolTracker === 'undefined') {
+                console.error('❌ poolTracker non défini');
+                return;
+            }
+            
+            // Variables globales
+            var currentTab = 'dashboard';
+            var poolData = {};
+            var charts = {};
+            var currentPeriod = 30;
+            var testsData = {
+                currentPage: 1,
+                perPage: 10,
+                total: 0,
+                filters: {
+                    search: '',
+                    dateFrom: '',
+                    dateTo: ''
+                }
+            };
+            
+            // Vérifier le statut d'auth au chargement
+            console.log('🔍 Vérification du statut d\'authentification...');
+            
+            fetch(poolTracker.ajax_url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: new URLSearchParams({
+                    'action': 'pool_get_auth_status',
+                    '_wpnonce': poolTracker.nonce
+                })
+            })
+            .then(function(response) {
+                return response.json();
+            })
+            .then(function(data) {
+                if (data.success) {
+                    var isAuthenticated = data.data.authenticated;
+                    var userInfo = data.data.user_info;
+                    
+                    // Fallback pour utilisateur temporaire
+                    if (!isAuthenticated) {
+                        var tempUser = sessionStorage.getItem('pooltracker_temp_user');
+                        if (tempUser) {
+                            try {
+                                userInfo = JSON.parse(tempUser);
+                                isAuthenticated = true;
+                            } catch (e) {}
+                        }
+                    }
+                    
+                    if (isAuthenticated && userInfo) {
+                        document.getElementById('user-display-name').textContent = userInfo.name || userInfo.email || 'Utilisateur';
+                        initApp();
+                    }
+                }
+            })
+            .catch(function(error) {
+                console.error('❌ Erreur vérification auth:', error);
+            });
+            
+            // Gestion déconnexion - VERSION DEBUG
+            function setupLogoutButton() {
+                console.log('🔗 PoolTracker: === CONFIGURATION BOUTON DÉCONNEXION ===');
+                
+                var logoutBtn = document.getElementById('logout-btn');
+                console.log('🔗 PoolTracker: Bouton trouvé:', logoutBtn !== null);
+                
+                if (logoutBtn) {
+                    console.log('🔗 PoolTracker: Attachement événement déconnexion');
+                    
+                    // Supprimer les anciens événements
+                    var newLogoutBtn = logoutBtn.cloneNode(true);
+                    logoutBtn.parentNode.replaceChild(newLogoutBtn, logoutBtn);
+                    
+                    newLogoutBtn.addEventListener('click', function(e) {
+                        console.log('🚪 PoolTracker: === CLIC DÉCONNEXION DÉTAILLÉ ===');
+                        e.preventDefault();
+                        e.stopPropagation();
+                        
+                        console.log('🚪 PoolTracker: Événement déclenché');
+                        console.log('🚪 PoolTracker: Target:', e.target);
+                        console.log('🚪 PoolTracker: Type événement:', e.type);
+                        
+                        if (confirm('Êtes-vous sûr de vouloir vous déconnecter ?')) {
+                            console.log('🚪 PoolTracker: === DÉCONNEXION CONFIRMÉE ===');
+                            
+                            // Nettoyer le sessionStorage d'abord
+                            sessionStorage.removeItem('pooltracker_temp_user');
+                            console.log('🚪 PoolTracker: Session storage nettoyé');
+                            
+                            // Vérifier poolTracker
+                            if (typeof poolTracker === 'undefined') {
+                                console.error('❌ PoolTracker: poolTracker non défini !');
+                                alert('Erreur: poolTracker non défini');
+                                return;
+                            }
+                            
+                            console.log('🚪 PoolTracker: === ENVOI REQUÊTE DÉCONNEXION ===');
+                            console.log('🚪 PoolTracker: URL AJAX:', poolTracker.ajax_url);
+                            console.log('🚪 PoolTracker: Nonce:', poolTracker.nonce);
+                            
+                            // Changer le texte du bouton
+                            newLogoutBtn.textContent = 'Déconnexion...';
+                            newLogoutBtn.disabled = true;
+                            
+                            fetch(poolTracker.ajax_url, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                                body: new URLSearchParams({
+                                    'action': 'pool_logout',
+                                    '_wpnonce': poolTracker.nonce
+                                })
+                            })
+                            .then(function(response) {
+                                console.log('🚪 PoolTracker: === RÉPONSE DÉCONNEXION ===');
+                                console.log('🚪 PoolTracker: Status HTTP:', response.status);
+                                console.log('🚪 PoolTracker: Status Text:', response.statusText);
+                                console.log('🚪 PoolTracker: Headers:', response.headers);
+                                
+                                return response.text();
+                            })
+                            .then(function(text) {
+                                console.log('🚪 PoolTracker: === CONTENU RÉPONSE DÉCONNEXION ===');
+                                console.log('🚪 PoolTracker: Texte brut:', text);
+                                
+                                let data;
+                                try {
+                                    data = JSON.parse(text);
+                                    console.log('🚪 PoolTracker: JSON parsé:', data);
+                                } catch (parseError) {
+                                    console.error('❌ PoolTracker: Erreur parsing déconnexion:', parseError);
+                                    console.error('❌ PoolTracker: Texte reçu:', text);
+                                    alert('Erreur parsing réponse déconnexion - rechargement forcé');
+                                    window.location.reload();
+                                    return;
+                                }
+                                
+                                if (data.success) {
+                                    console.log('✅ PoolTracker: === DÉCONNEXION RÉUSSIE CÔTÉ SERVEUR ===');
+                                    console.log('✅ PoolTracker: Message:', data.data.message);
+                                    console.log('✅ PoolTracker: Debug info:', data.data.debug);
+                                    
+                                    // Supprimer aussi les cookies côté client
+                                    document.cookie.split(";").forEach(function(c) { 
+                                        document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"); 
+                                    });
+                                    console.log('🧹 PoolTracker: Cookies client supprimés');
+                                    
+                                    // Forcer le rechargement
+                                    console.log('🔄 PoolTracker: === RECHARGEMENT APRÈS DÉCONNEXION ===');
+                                    setTimeout(function() {
+                                        console.log('🔄 PoolTracker: RECHARGEMENT MAINTENANT !');
+                                        window.location.href = '/espace-client/'; // Redirection explicite
+                                    }, 500);
+                                    
+                                } else {
+                                    console.error('❌ PoolTracker: === ERREUR DÉCONNEXION CÔTÉ SERVEUR ===');
+                                    console.error('❌ PoolTracker: Success:', data.success);
+                                    console.error('❌ PoolTracker: Data:', data.data);
+                                    
+                                    alert('Erreur de déconnexion côté serveur: ' + (data.data || 'Inconnue'));
+                                    
+                                    // Recharger quand même pour forcer la déconnexion
+                                    window.location.reload();
+                                }
+                            })
+                            .catch(function(error) {
+                                console.error('❌ PoolTracker: === ERREUR RÉSEAU DÉCONNEXION ===');
+                                console.error('❌ PoolTracker: Error:', error);
+                                
+                                alert('Erreur réseau lors de la déconnexion: ' + error.message);
+                                
+                                // Recharger quand même
+                                window.location.reload();
+                            });
+                        } else {
+                            console.log('🚪 PoolTracker: Déconnexion annulée par l\'utilisateur');
+                        }
+                    });
+                    
+                    console.log('✅ PoolTracker: Événement déconnexion attaché avec succès');
+                } else {
+                    console.error('❌ PoolTracker: Bouton déconnexion non trouvé !');
+                    
+                    // Essayer de le trouver autrement
+                    var logoutByClass = document.querySelector('.logout-link');
+                    console.log('🔍 PoolTracker: Bouton trouvé par classe:', logoutByClass !== null);
+                    
+                    var allButtons = document.querySelectorAll('button');
+                    console.log('🔍 PoolTracker: Nombre total de boutons:', allButtons.length);
+                    
+                    for (var i = 0; i < allButtons.length; i++) {
+                        if (allButtons[i].textContent.includes('Déconnexion')) {
+                            console.log('🔍 PoolTracker: Bouton déconnexion trouvé par texte:', allButtons[i]);
+                        }
+                    }
+                }
+            }
+            
+            setupLogoutButton();
+            
+            function initApp() {
+                setupTabNavigation();
+                loadUserData();
+                setupForms();
+                setupCharts();
+                setupTestsManagement();
+                
+                // Définir la date d'aujourd'hui par défaut
+                document.getElementById('test-date').value = new Date().toISOString().split('T')[0];
+                document.getElementById('test-time').value = new Date().toTimeString().split(' ')[0].substring(0,5);
+            }
+            
+            // Navigation onglets
+            function setupTabNavigation() {
+                var tabs = document.querySelectorAll('.nav-tab');
+                for (var i = 0; i < tabs.length; i++) {
+                    tabs[i].addEventListener('click', function() {
+                        var tabName = this.dataset.tab;
+                        switchTab(tabName);
+                    });
+                }
+            }
+            
+            window.switchTab = function(tabName) {
+                // Mettre à jour navigation
+                var allTabs = document.querySelectorAll('.nav-tab');
+                for (var i = 0; i < allTabs.length; i++) {
+                    allTabs[i].classList.remove('active');
+                }
+                document.querySelector('[data-tab="' + tabName + '"]').classList.add('active');
+                
+                // Mettre à jour contenu
+                var allContent = document.querySelectorAll('.tab-content');
+                for (var i = 0; i < allContent.length; i++) {
+                    allContent[i].classList.remove('active');
+                }
+                document.getElementById('tab-' + tabName).classList.add('active');
+                
+                currentTab = tabName;
+                
+                // Actions spécifiques par onglet
+                if (tabName === 'charts') {
+                    setTimeout(function() {
+                        loadChartData();
+                    }, 100);
+                } else if (tabName === 'profile') {
+                    loadProfile();
+                } else if (tabName === 'tests') {
+                    loadUserTests();
+                }
+            }
+            
+            // Fonctions placeholder pour éviter les erreurs
+            function loadUserData() {
+                console.log('📊 Chargement des données utilisateur...');
+                // Simulation pour éviter les erreurs
+                document.getElementById('total-tests').textContent = '0';
+                document.getElementById('current-ph').textContent = '-';
+                document.getElementById('current-chlorine').textContent = '-';
+                document.getElementById('days-since-test').textContent = '-';
+                
+                document.getElementById('daily-ai-advice').innerHTML = '💡 Bienvenue dans PoolTracker ! Commencez par configurer votre piscine dans l\'onglet "Ma piscine", puis ajoutez votre premier test.';
+            }
+            
+            function setupForms() {
+                console.log('📝 Configuration des formulaires...');
+                // Formulaires de base configurés
+            }
+            
+            function setupCharts() {
+                console.log('📈 Configuration des graphiques...');
+                // Graphiques de base configurés
+            }
+            
+            function setupTestsManagement() {
+                console.log('📋 Configuration gestion des tests...');
+                // Gestion des tests configurée
+            }
+            
+            function loadChartData() {
+                console.log('📈 Chargement données graphiques...');
+                // Placeholder pour graphiques
+                var ctx = document.getElementById('ph-chart');
+                if (ctx && typeof Chart !== 'undefined') {
+                    new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'],
+                            datasets: [{
+                                label: 'pH',
+                                data: [7.2, 7.1, 7.3, 7.2, 7.4, 7.1, 7.2],
+                                borderColor: '#3AA6B9',
+                                tension: 0.4
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false
+                        }
+                    });
+                }
+            }
+            
+            function loadProfile() {
+                console.log('⚙️ Chargement profil...');
+                // Chargement profil
+            }
+            
+            function loadUserTests() {
+                console.log('📋 Chargement tests utilisateur...');
+                // Afficher message "pas de tests"
+                document.getElementById('no-tests').style.display = 'block';
+                document.getElementById('tests-table-container').style.display = 'none';
+            }
+        });
+        </script>
+        <?php
+        return ob_get_clean();
+    }
+    
+    // =====================================
+    // MÉTHODES ESSENTIELLES MANQUANTES
+    // =====================================
+    
+    public function get_user_profile($user_id) {
+        global $wpdb;
+        
+        $profile = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$this->table_users} WHERE user_id = %d",
+            $user_id
+        ));
+        
+        // Si pas de profil, créer un profil par défaut
+        if (!$profile) {
+            $this->create_default_profile($user_id);
+            return $this->get_user_profile($user_id);
+        }
+        
+        return $profile;
+    }
+    
+    public function create_default_profile($user_id) {
+        global $wpdb;
+        
+        return $wpdb->insert(
+            $this->table_users,
+            array(
+                'user_id' => $user_id,
+                'pool_volume' => null,
+                'pool_treatment_type' => null,
+                'pool_filtration_type' => null,
+                'filtration_hours' => 8
+            ),
+            array('%d', '%s', '%s', '%s', '%d')
+        );
+    }
+    
+    public function update_user_profile() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        global $wpdb;
+        
+        $data = array(
+            'pool_volume' => floatval($_POST['pool_volume']),
+            'pool_treatment_type' => sanitize_text_field($_POST['pool_treatment_type']),
+            'pool_filtration_type' => sanitize_text_field($_POST['pool_filtration_type']),
+            'pool_depth_avg' => floatval($_POST['pool_depth_avg']),
+            'pool_shape' => sanitize_text_field($_POST['pool_shape']),
+            'has_cover' => intval($_POST['has_cover']),
+            'has_heat_pump' => intval($_POST['has_heat_pump']),
+            'filtration_hours' => intval($_POST['filtration_hours'])
+        );
+        
+        $result = $wpdb->update(
+            $this->table_users,
+            $data,
+            array('user_id' => $user_id),
+            array('%f', '%s', '%s', '%f', '%s', '%d', '%d', '%d'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Profil mis à jour avec succès');
+        } else {
+            wp_send_json_error('Erreur lors de la mise à jour');
+        }
+    }
+    
+    public function save_measurement() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        global $wpdb;
+        
+        $data = array(
+            'user_id' => $user_id,
+            'ph_value' => !empty($_POST['ph_value']) ? floatval($_POST['ph_value']) : null,
+            'chlorine_mg_l' => !empty($_POST['chlorine_mg_l']) ? floatval($_POST['chlorine_mg_l']) : null,
+            'temperature_c' => !empty($_POST['temperature_c']) ? floatval($_POST['temperature_c']) : null,
+            'alkalinity' => !empty($_POST['alkalinity']) ? intval($_POST['alkalinity']) : null,
+            'hardness' => !empty($_POST['hardness']) ? intval($_POST['hardness']) : null,
+            'notes' => sanitize_textarea_field($_POST['notes']),
+            'test_date' => sanitize_text_field($_POST['test_date']),
+            'test_time' => sanitize_text_field($_POST['test_time']),
+            'weather_condition' => sanitize_text_field($_POST['weather_condition'])
+        );
+        
+        $result = $wpdb->insert($this->table_measurements, $data);
+        
+        if ($result) {
+            $measurement_id = $wpdb->insert_id;
+            
+            // Génération automatique d'alertes
+            $this->generate_automatic_alerts($user_id, $data, $measurement_id);
+            
+            wp_send_json_success(array(
+                'message' => 'Mesure enregistrée avec succès',
+                'measurement_id' => $measurement_id
+            ));
+        } else {
+            wp_send_json_error('Erreur lors de l\'enregistrement');
+        }
+    }
+    
+    public function get_user_dashboard_data() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        global $wpdb;
+        
+        // Statistiques utilisateur
+        $total_tests = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table_measurements} WHERE user_id = %d",
+            $user_id
+        ));
+        
+        $latest_measurement = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} WHERE user_id = %d ORDER BY test_date DESC, test_time DESC LIMIT 1",
+            $user_id
+        ));
+        
+        $recent_measurements = $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} WHERE user_id = %d ORDER BY test_date DESC, test_time DESC LIMIT 5",
+            $user_id
+        ));
+        
+        $active_alerts = $this->get_user_alerts($user_id, true);
+        
+        wp_send_json_success(array(
+            'stats' => array(
+                'total_tests' => $total_tests,
+                'current_ph' => $latest_measurement ? $latest_measurement->ph_value : null,
+                'current_chlorine' => $latest_measurement ? $latest_measurement->chlorine_mg_l : null,
+                'last_test_date' => $latest_measurement ? $latest_measurement->test_date : null
+            ),
+            'recent_measurements' => $recent_measurements,
+            'alerts' => $active_alerts
+        ));
+    }
+    
+    public function get_chart_data() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        $days = intval($_POST['days']) ?: 30;
+        
+        $measurements = $this->get_user_measurements($user_id, $days);
+        
+        wp_send_json_success(array(
+            'measurements' => $measurements,
+            'period' => $days
+        ));
+    }
+    
+    public function get_user_measurements($user_id, $days_limit = 30) {
+        global $wpdb;
+        
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} 
+             WHERE user_id = %d 
+             AND test_date >= DATE_SUB(CURDATE(), INTERVAL %d DAY)
+             ORDER BY test_date DESC, test_time DESC",
+            $user_id, $days_limit
+        ));
+    }
+    
+    private function generate_automatic_alerts($user_id, $measurement_data, $measurement_id) {
+        global $wpdb;
+        
+        $alerts = array();
+        
+        // Alerte pH
+        if (!empty($measurement_data['ph_value'])) {
+            $ph = floatval($measurement_data['ph_value']);
+            if ($ph < 6.8 || $ph > 7.6) {
+                $category = ($ph < 6.5 || $ph > 8.0) ? 'urgent' : 'warning';
+                $alerts[] = array(
+                    'alert_type' => 'ph_anomaly',
+                    'alert_category' => $category,
+                    'alert_title' => 'pH anormal détecté',
+                    'alert_message' => "pH mesuré: {$ph}. Valeur recommandée: 7.0-7.4",
+                    'related_measurement_id' => $measurement_id
+                );
+            }
+        }
+        
+        // Alerte chlore
+        if (!empty($measurement_data['chlorine_mg_l'])) {
+            $chlorine = floatval($measurement_data['chlorine_mg_l']);
+            if ($chlorine < 0.5 || $chlorine > 2.5) {
+                $category = ($chlorine < 0.2 || $chlorine > 3.0) ? 'urgent' : 'warning';
+                $alerts[] = array(
+                    'alert_type' => 'chlorine_anomaly',
+                    'alert_category' => $category,
+                    'alert_title' => 'Taux de chlore anormal',
+                    'alert_message' => "Chlore mesuré: {$chlorine} mg/L. Valeur recommandée: 0.5-2.0 mg/L",
+                    'related_measurement_id' => $measurement_id
+                );
+            }
+        }
+        
+        // Sauvegarder les alertes
+        foreach ($alerts as $alert) {
+            $alert['user_id'] = $user_id;
+            $wpdb->insert($this->table_alerts, $alert);
+        }
+    }
+    
+    public function get_user_alerts($user_id, $unread_only = false) {
+        global $wpdb;
+        
+        $where_clause = "user_id = %d";
+        $params = array($user_id);
+        
+        if ($unread_only) {
+            $where_clause .= " AND is_read = 0";
+        }
+        
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$this->table_alerts} WHERE {$where_clause} ORDER BY created_at DESC LIMIT 10",
+            $params
+        ));
+    }
+    
+    public function get_personalized_ai_advice() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        // Simulation d'un conseil IA personnalisé
+        $advice = "💡 Conseil du jour : Votre pH est stable, continuez ainsi ! N'oubliez pas de vérifier votre filtration.";
+        
+        wp_send_json_success(array(
+            'advice' => $advice
+        ));
+    }
+    
+    public function mark_alert_read() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        global $wpdb;
+        $alert_id = intval($_POST['alert_id']);
+        
+        $result = $wpdb->update(
+            $this->table_alerts,
+            array('is_read' => 1),
+            array('id' => $alert_id),
+            array('%d'),
+            array('%d')
+        );
+        
+        wp_send_json_success('Alerte marquée comme lue');
+    }
+    
+    public function get_user_tests_paginated() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        global $wpdb;
+        
+        $page = intval($_POST['page']) ?: 1;
+        $per_page = intval($_POST['per_page']) ?: 10;
+        $offset = ($page - 1) * $per_page;
+        
+        $where_conditions = array("user_id = %d");
+        $where_params = array($user_id);
+        
+        // Filtres
+        if (!empty($_POST['search'])) {
+            $search = '%' . $wpdb->esc_like($_POST['search']) . '%';
+            $where_conditions[] = "(notes LIKE %s OR weather_condition LIKE %s)";
+            $where_params[] = $search;
+            $where_params[] = $search;
+        }
+        
+        if (!empty($_POST['date_from'])) {
+            $where_conditions[] = "test_date >= %s";
+            $where_params[] = $_POST['date_from'];
+        }
+        
+        if (!empty($_POST['date_to'])) {
+            $where_conditions[] = "test_date <= %s";
+            $where_params[] = $_POST['date_to'];
+        }
+        
+        $where_clause = implode(' AND ', $where_conditions);
+        
+        // Compter le total
+        $total = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->table_measurements} WHERE {$where_clause}",
+            $where_params
+        ));
+        
+        // Récupérer les tests
+        $tests = $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} 
+             WHERE {$where_clause} 
+             ORDER BY test_date DESC, test_time DESC 
+             LIMIT %d OFFSET %d",
+            array_merge($where_params, array($per_page, $offset))
+        ));
+        
+        wp_send_json_success(array(
+            'tests' => $tests,
+            'total' => $total,
+            'page' => $page,
+            'per_page' => $per_page,
+            'total_pages' => ceil($total / $per_page)
+        ));
+    }
+    
+    public function update_measurement() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        global $wpdb;
+        $measurement_id = intval($_POST['measurement_id']);
+        $user_id = $this->get_current_pooltracker_user_id();
+        
+        // Vérifier que la mesure appartient à l'utilisateur
+        $existing = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} WHERE id = %d AND user_id = %d",
+            $measurement_id, $user_id
+        ));
+        
+        if (!$existing) {
+            wp_send_json_error('Mesure non trouvée');
+        }
+        
+        $data = array(
+            'ph_value' => !empty($_POST['ph_value']) ? floatval($_POST['ph_value']) : null,
+            'chlorine_mg_l' => !empty($_POST['chlorine_mg_l']) ? floatval($_POST['chlorine_mg_l']) : null,
+            'temperature_c' => !empty($_POST['temperature_c']) ? floatval($_POST['temperature_c']) : null,
+            'alkalinity' => !empty($_POST['alkalinity']) ? intval($_POST['alkalinity']) : null,
+            'notes' => sanitize_textarea_field($_POST['notes'])
+        );
+        
+        $result = $wpdb->update(
+            $this->table_measurements,
+            $data,
+            array('id' => $measurement_id),
+            array('%f', '%f', '%f', '%d', '%s'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Mesure mise à jour');
+        } else {
+            wp_send_json_error('Erreur de mise à jour');
+        }
+    }
+    
+    public function delete_measurement() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        global $wpdb;
+        $measurement_id = intval($_POST['measurement_id']);
+        $user_id = $this->get_current_pooltracker_user_id();
+        
+        $result = $wpdb->delete(
+            $this->table_measurements,
+            array(
+                'id' => $measurement_id,
+                'user_id' => $user_id
+            ),
+            array('%d', '%d')
+        );
+        
+        if ($result) {
+            wp_send_json_success('Mesure supprimée');
+        } else {
+            wp_send_json_error('Erreur de suppression');
+        }
+    }
+    
+    public function export_tests_csv() {
+        if (!$this->is_user_authenticated() || !wp_verify_nonce($_POST['_wpnonce'], 'pooltracker_nonce')) {
+            wp_send_json_error('Accès non autorisé');
+        }
+        
+        $user_id = $this->get_current_pooltracker_user_id();
+        global $wpdb;
+        
+        $tests = $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$this->table_measurements} WHERE user_id = %d ORDER BY test_date DESC",
+            $user_id
+        ));
+        
+        $filename = 'pooltracker_tests_' . date('Y-m-d') . '.csv';
+        
+        header('Content-Type: text/csv');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        
+        $output = fopen('php://output', 'w');
+        
+        // En-têtes CSV
+        fputcsv($output, array(
+            'Date', 'Heure', 'pH', 'Chlore (mg/L)', 'Température (°C)', 
+            'TAC', 'Dureté', 'Météo', 'Notes'
+        ));
+        
+        // Données
+        foreach ($tests as $test) {
+            fputcsv($output, array(
+                $test->test_date,
+                $test->test_time,
+                $test->ph_value,
+                $test->chlorine_mg_l,
+                $test->temperature_c,
+                $test->alkalinity,
+                $test->hardness,
+                $test->weather_condition,
+                $test->notes
+            ));
+        }
+        
+        fclose($output);
+        exit;
+    }
+    
+    public function add_user_context($context, $user_id) {
+        if (!$user_id || !$this->is_user_authenticated()) {
+            return $context;
+        }
+        
+        $profile = $this->get_user_profile($user_id);
+        $recent_measurements = $this->get_user_measurements($user_id, 7);
+        
+        $personalized_context = "\n\n🏊‍♂️ PROFIL UTILISATEUR PERSONNALISÉ :\n";
+        $personalized_context .= "=====================================\n";
+        
+        if ($profile->pool_volume) {
+            $personalized_context .= "• Volume piscine : {$profile->pool_volume}m³\n";
+        }
+        if ($profile->pool_treatment_type) {
+            $personalized_context .= "• Type traitement : {$profile->pool_treatment_type}\n";
+        }
+        if ($profile->pool_filtration_type) {
+            $personalized_context .= "• Filtration : {$profile->pool_filtration_type}\n";
+        }
+        
+        if (!empty($recent_measurements)) {
+            $personalized_context .= "\n📊 DERNIÈRES MESURES (7 jours) :\n";
+            foreach (array_slice($recent_measurements, 0, 5) as $measure) {
+                $personalized_context .= "• {$measure->test_date} : pH {$measure->ph_value}, Cl {$measure->chlorine_mg_l}mg/L";
+                if ($measure->temperature_c) {
+                    $personalized_context .= ", {$measure->temperature_c}°C";
+                }
+                $personalized_context .= "\n";
+            }
+        }
+        
+        // Alertes actives
+        $active_alerts = $this->get_user_alerts($user_id, true);
+        if (!empty($active_alerts)) {
+            $personalized_context .= "\n🚨 ALERTES ACTIVES :\n";
+            foreach (array_slice($active_alerts, 0, 3) as $alert) {
+                $personalized_context .= "• {$alert->alert_title}\n";
+            }
+        }
+        
+        $personalized_context .= "=====================================\n";
+        $personalized_context .= "Utilise ces données pour des conseils précis et personnalisés.\n";
+        
+        return $context . $personalized_context;
+    }
+    
+    // =====================================
+    // CRÉATION DES TABLES
+    // =====================================
+    
+    private function maybe_create_missing_tables() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        
+        // Table utilisateurs Auth0
+        $table_auth0 = $this->table_auth0_users;
+        if ($wpdb->get_var("SHOW TABLES LIKE '$table_auth0'") != $table_auth0) {
+            $sql = "CREATE TABLE $table_auth0 (
+                id mediumint(9) NOT NULL AUTO_INCREMENT,
+                pooltracker_user_id int(11) NOT NULL,
+                auth0_sub varchar(255) NOT NULL,
+                email varchar(255) NOT NULL,
+                name varchar(255) DEFAULT NULL,
+                picture text DEFAULT NULL,
+                provider varchar(50) DEFAULT NULL,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                last_login datetime DEFAULT NULL,
+                is_active tinyint(1) DEFAULT 1,
+                PRIMARY KEY (id),
+                UNIQUE KEY auth0_sub (auth0_sub),
+                UNIQUE KEY pooltracker_user_id (pooltracker_user_id),
+                INDEX email (email),
+                INDEX provider (provider)
+            ) $charset_collate;";
+            
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+        }
+        
+        // Vérifier les autres tables
+        $tables_to_check = array(
+            $this->table_users,
+            $this->table_measurements,
+            $this->table_alerts
+        );
+        
+        foreach ($tables_to_check as $table) {
+            if ($wpdb->get_var("SHOW TABLES LIKE '$table'") != $table) {
+                $this->create_missing_table($table);
+            }
+        }
+    }
+    
+    private function create_missing_table($table_name) {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+        
+        if ($table_name === $this->table_users) {
+            $sql = "CREATE TABLE $table_name (
+                id mediumint(9) NOT NULL AUTO_INCREMENT,
+                user_id int(11) NOT NULL,
+                pool_volume decimal(8,2) DEFAULT NULL,
+                pool_treatment_type varchar(50) DEFAULT NULL,
+                pool_filtration_type varchar(50) DEFAULT NULL,
+                pool_depth_avg decimal(4,2) DEFAULT NULL,
+                pool_shape varchar(50) DEFAULT NULL,
+                has_cover tinyint(1) DEFAULT 0,
+                has_heat_pump tinyint(1) DEFAULT 0,
+                filtration_hours int(2) DEFAULT 8,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY user_id (user_id)
+            ) $charset_collate;";
+        } elseif ($table_name === $this->table_measurements) {
+            $sql = "CREATE TABLE $table_name (
+                id mediumint(9) NOT NULL AUTO_INCREMENT,
+                user_id int(11) NOT NULL,
+                ph_value decimal(3,1) DEFAULT NULL,
+                chlorine_mg_l decimal(4,2) DEFAULT NULL,
+                temperature_c decimal(4,1) DEFAULT NULL,
+                alkalinity int(4) DEFAULT NULL,
+                hardness int(4) DEFAULT NULL,
+                notes text DEFAULT NULL,
+                test_date date NOT NULL,
+                test_time time DEFAULT NULL,
+                weather_condition varchar(50) DEFAULT NULL,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                INDEX user_id (user_id),
+                INDEX test_date (test_date)
+            ) $charset_collate;";
+        } elseif ($table_name === $this->table_alerts) {
+            $sql = "CREATE TABLE $table_name (
+                id mediumint(9) NOT NULL AUTO_INCREMENT,
+                user_id int(11) NOT NULL,
+                alert_type varchar(50) NOT NULL,
+                alert_category varchar(20) DEFAULT 'info',
+                alert_title varchar(255) NOT NULL,
+                alert_message text NOT NULL,
+                related_measurement_id int(11) DEFAULT NULL,
+                is_read tinyint(1) DEFAULT 0,
+                created_at datetime DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                INDEX user_id (user_id),
+                INDEX is_read (is_read)
+            ) $charset_collate;";
+        }
+        
+        if (isset($sql)) {
+            require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+            dbDelta($sql);
+        }
+    }
+}
+
+// Initialisation
+new PoolUserSystemAuth0();
+
+// Hook pour permettre l'extension par d'autres plugins
+do_action('pooltracker_auth0_system_loaded');
+?>

@@ -1,0 +1,150 @@
+
+@import "leaflet/dist/leaflet.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 194 71% 95%; /* #E9F8F9 */
+    --foreground: 204 10% 20%; /* #2d333a */
+
+    --card: 0 0% 100%;
+    --card-foreground: 204 10% 20%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 204 10% 20%;
+
+    --primary: 193 54% 51%; /* #5CC6D4 */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 201 30% 88%; /* Adjusted for light theme */
+    --input: 201 30% 88%;
+    --ring: 193 54% 51%;
+
+    --radius: 0.75rem;
+
+    /* FullCalendar custom properties */
+    --fc-border-color: #e2e8f0;
+    --fc-daygrid-event-dot-width: 8px;
+    --fc-list-event-dot-width: 10px;
+    --fc-list-event-hover-bg-color: #f1f5f9;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'DM Sans', sans-serif;
+  }
+}
+
+.text-main {
+  color: #143C4B;
+}
+
+.bg-main-accent {
+  background-color: #3AA6B9;
+}
+
+.border-main-accent {
+  border-color: #3AA6B9;
+}
+
+.leaflet-container {
+    height: 400px;
+    width: 100%;
+    border-radius: 1rem;
+    z-index: 1;
+}
+
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background-color: rgba(255, 255, 255, 0.8) !important;
+    backdrop-filter: blur(10px) !important;
+    -webkit-backdrop-filter: blur(10px) !important;
+    border-radius: 0.75rem !important;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1) !important;
+}
+
+.leaflet-popup-content {
+    margin: 1rem !important;
+    font-family: 'DM Sans', sans-serif !important;
+}
+
+.leaflet-popup-close-button {
+    color: #143C4B !important;
+    padding: 0.25rem !important;
+}
+
+/* FullCalendar Customizations */
+.fc {
+  @apply text-sm;
+}
+.fc .fc-toolbar.fc-header-toolbar {
+  @apply mb-4;
+}
+.fc .fc-toolbar-title {
+  @apply text-xl font-bold text-pool-blue-800;
+}
+.fc .fc-button {
+  @apply bg-pool-blue-400 border-none text-white hover:bg-pool-blue-500;
+}
+.fc .fc-button-primary:not(:disabled).fc-button-active, .fc .fc-button-primary:not(:disabled):active {
+  @apply bg-pool-blue-600;
+}
+.fc .fc-daygrid-day-number {
+  @apply text-pool-blue-700;
+}
+.fc-theme-standard .fc-scrollgrid {
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+.fc .fc-timegrid-slot-label-frame {
+  @apply text-xs text-pool-blue-600/70;
+}
+.fc .fc-timegrid-axis-frame {
+  align-items: flex-start;
+  padding-top: 4px;
+}
+.fc .fc-col-header-cell-cushion {
+  @apply font-semibold text-pool-blue-800;
+}
+
+/* Event status colors */
+.fc-event.status-pending {
+    background-color: #fef08a !important; /* yellow-200 */
+    border-color: #facc15 !important; /* yellow-400 */
+    color: #713f12 !important; /* yellow-900 */
+}
+.fc-event.status-confirmed {
+    background-color: #dcfce7 !important; /* green-200 */
+    border-color: #4ade80 !important; /* green-400 */
+    color: #14532d !important; /* green-900 */
+}
+.fc-event.status-cancelled {
+    background-color: #fee2e2 !important; /* red-200 */
+    border-color: #f87171 !important; /* red-400 */
+    color: #7f1d1d !important; /* red-900 */
+}
+.fc-event .fc-event-main {
+    padding: 4px;
+}
+.fc-event .fc-event-title {
+    font-weight: 600;
+}
