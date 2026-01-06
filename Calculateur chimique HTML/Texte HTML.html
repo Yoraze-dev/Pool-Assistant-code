@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calculateur de Dosage - Pool Assistant</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, rgba(77, 208, 225, 0.1) 0%, rgba(77, 208, 225, 0.05) 100%), 
+                        url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="pool" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="10" cy="10" r="1" fill="rgba(77,208,225,0.1)"/></pattern></defs><rect width="100" height="100" fill="url(%23pool)"/></svg>');
+            min-height: 100vh;
+            padding: 20px;
+            background-color: #f8faff;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4DD0E1 0%, #26C6DA 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .calculator-content {
+            padding: 40px;
+        }
+
+        .pool-info-section {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+            border-left: 5px solid #4DD0E1;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            color: #2c3e50;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .pool-info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-label {
+            display: block;
+            font-weight: 600;
+            color: #34495e;
+            margin-bottom: 8px;
+            font-size: 1rem;
+        }
+
+        .input-field {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e6ed;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            background: #fafbfc;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #4DD0E1;
+            box-shadow: 0 0 0 3px rgba(77, 208, 225, 0.15);
+            background: white;
+        }
+
+        .unit {
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            margin-left: 5px;
+        }
+
+        .products-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+            margin-top: 30px;
+        }
+
+        .product-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .product-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #4DD0E1, #26C6DA);
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+        }
+
+        .product-card:hover::before {
+            transform: translateX(0);
+        }
+
+        .product-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15);
+        }
+
+        .product-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .product-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 15px;
+            font-size: 1.5rem;
+        }
+
+        .ph-plus { background: linear-gradient(135deg, #27ae60, #2ecc71); }
+        .chlorine { background: linear-gradient(135deg, #f39c12, #e67e22); }
+        .alkalinity { background: linear-gradient(135deg, #9b59b6, #8e44ad); }
+        .hardness { background: linear-gradient(135deg, #3498db, #2980b9); }
+        .stabilizer { background: linear-gradient(135deg, #1abc9c, #16a085); }
+
+        .product-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .product-subtitle {
+            font-size: 0.9rem;
+            color: #7f8c8d;
+            margin-top: 2px;
+        }
+
+        .measurement-inputs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .result-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #4DD0E1;
+        }
+
+        .dosage-result {
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .dosage-details {
+            font-size: 0.95rem;
+            color: #5a6c7d;
+            line-height: 1.4;
+        }
+
+        .calculate-all-btn {
+            background: linear-gradient(135deg, #4DD0E1 0%, #26C6DA 100%);
+            color: white;
+            border: none;
+            padding: 18px 40px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: block;
+            margin: 40px auto;
+            min-width: 250px;
+        }
+
+        .calculate-all-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(77, 208, 225, 0.3);
+        }
+
+        .calculate-all-btn:active {
+            transform: translateY(0);
+            background: linear-gradient(135deg, #26C6DA 0%, #00BCD4 100%);
+        }
+
+        .summary-section {
+            background: linear-gradient(135deg, #4DD0E1 0%, #0097A7 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            margin-top: 30px;
+            display: none;
+        }
+
+        .summary-title {
+            font-size: 1.8rem;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .summary-item {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(5px);
+        }
+
+        .summary-product {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .summary-dosage {
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+
+        .tips-section {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 15px;
+            margin-top: 20px;
+        }
+
+        .tips-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .tip-item {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #4DD0E1;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+
+        .debug-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 20px 0;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .pool-info-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .products-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .calculator-content {
+                padding: 20px;
+            }
+
+            .measurement-inputs {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        
+        <div class="calculator-content">
+
+            <!-- Informations de la piscine -->
+            <div class="pool-info-section">
+                <h2 class="section-title">🏊‍♀️ Informations de votre piscine</h2>
+                <div class="pool-info-grid">
+                    <div class="input-group">
+                        <label class="input-label">Volume de la piscine <span class="unit">(m³)</span></label>
+                        <input type="number" class="input-field" id="pool-volume" min="1" max="1000" step="0.5" placeholder="50" value="50">
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Type de revêtement</label>
+                        <select class="input-field" id="pool-type">
+                            <option value="liner">Liner PVC</option>
+                            <option value="polyester">Polyester</option>
+                            <option value="carrelage">Carrelage</option>
+                            <option value="beton">Béton peint</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Température de l'eau <span class="unit">(°C)</span></label>
+                        <input type="number" class="input-field" id="water-temp" min="10" max="40" step="0.5" placeholder="26" value="26">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Grille des produits -->
+            <div class="products-grid">
+                <!-- pH -->
+                <div class="product-card">
+                    <div class="product-header">
+                        <div class="product-icon ph-plus">🧪</div>
+                        <div>
+                            <div class="product-title">Correction pH</div>
+                            <div class="product-subtitle">pH Plus ou pH Minus</div>
+                        </div>
+                    </div>
+                    <div class="measurement-inputs">
+                        <div class="input-group">
+                            <label class="input-label">pH actuel</label>
+                            <input type="number" class="input-field" id="ph-current" min="6" max="9" step="0.1" placeholder="7.0" value="6.8">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">pH cible</label>
+                            <input type="number" class="input-field" id="ph-target" min="6" max="9" step="0.1" placeholder="7.2" value="7.2">
+                        </div>
+                    </div>
+                    <div class="result-section" id="ph-result">
+                        <div class="dosage-result" id="ph-dosage">Cliquez sur "Calculer" pour voir le dosage</div>
+                        <div class="dosage-details" id="ph-details">En attente du calcul...</div>
+                    </div>
+                </div>
+
+                <!-- Chlore -->
+                <div class="product-card">
+                    <div class="product-header">
+                        <div class="product-icon chlorine">🧪</div>
+                        <div>
+                            <div class="product-title">Chlore</div>
+                            <div class="product-subtitle">Traitement désinfectant</div>
+                        </div>
+                    </div>
+                    <div class="measurement-inputs">
+                        <div class="input-group">
+                            <label class="input-label">Chlore actuel <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="chlorine-current" min="0" max="10" step="0.1" placeholder="0.5" value="0.3">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">Chlore cible <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="chlorine-target" min="0" max="10" step="0.1" placeholder="1.5" value="1.5">
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label class="input-label">Type de chlore</label>
+                        <select class="input-field" id="chlorine-type">
+                            <option value="hypochlorite-ca">Hypochlorite de calcium 70%</option>
+                            <option value="hypochlorite-na-13">Hypochlorite de sodium 13%</option>
+                            <option value="hypochlorite-na-95">Hypochlorite de sodium 9,5%</option>
+                            <option value="dichlore">Chlore choc stabilisé 60%</option>
+                            <option value="trichlore">Galet chlore stabilisé 90%</option>
+                        </select>
+                    </div>
+                    <div class="result-section" id="chlorine-result">
+                        <div class="dosage-result" id="chlorine-dosage">Cliquez sur "Calculer" pour voir le dosage</div>
+                        <div class="dosage-details" id="chlorine-details">En attente du calcul...</div>
+                    </div>
+                </div>
+
+                <!-- Alcalinité -->
+                <div class="product-card">
+                    <div class="product-header">
+                        <div class="product-icon alkalinity">🔬</div>
+                        <div>
+                            <div class="product-title">TAC</div>
+                            <div class="product-subtitle">Bicarbonate de sodium</div>
+                        </div>
+                    </div>
+                    <div class="measurement-inputs">
+                        <div class="input-group">
+                            <label class="input-label">TAC actuel <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="alkalinity-current" min="0" max="300" step="5" placeholder="60" value="60">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">TAC cible <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="alkalinity-target" min="0" max="300" step="5" placeholder="100" value="100">
+                        </div>
+                    </div>
+                    <div class="result-section" id="alkalinity-result">
+                        <div class="dosage-result" id="alkalinity-dosage">Cliquez sur "Calculer" pour voir le dosage</div>
+                        <div class="dosage-details" id="alkalinity-details">En attente du calcul...</div>
+                    </div>
+                </div>
+
+                <!-- Stabilisant -->
+                <div class="product-card">
+                    <div class="product-header">
+                        <div class="product-icon stabilizer">🛡️</div>
+                        <div>
+                            <div class="product-title">Stabilisant</div>
+                            <div class="product-subtitle">Acide cyanurique</div>
+                        </div>
+                    </div>
+                    <div class="measurement-inputs">
+                        <div class="input-group">
+                            <label class="input-label">Stabilisant actuel <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="stabilizer-current" min="0" max="100" step="5" placeholder="10" value="10">
+                        </div>
+                        <div class="input-group">
+                            <label class="input-label">Stabilisant cible <span class="unit">(mg/L)</span></label>
+                            <input type="number" class="input-field" id="stabilizer-target" min="0" max="100" step="5" placeholder="30" value="30">
+                        </div>
+                    </div>
+                    <div class="result-section" id="stabilizer-result">
+                        <div class="dosage-result" id="stabilizer-dosage">Cliquez sur "Calculer" pour voir le dosage</div>
+                        <div class="dosage-details" id="stabilizer-details">En attente du calcul...</div>
+                    </div>
+                </div>
+            </div>
+
+            <button class="calculate-all-btn" onclick="manualCalculate()">
+                🧮 Calculer tous les dosages
+            </button>
+
+            <!-- Résumé des dosages -->
+            <div class="summary-section" id="summary-section">
+                <h3 class="summary-title">📋 Résumé des dosages nécessaires</h3>
+                <div class="summary-grid" id="summary-grid"></div>
+            </div>
+
+            <!-- Conseils -->
+            <div class="tips-section">
+                <h3 class="section-title">💡 Conseils d'utilisation</h3>
+                <div class="tips-grid">
+                    <div class="tip-item">
+                        <strong>Ordre d'ajout :</strong> Corrigez d'abord l'alcalinité, puis le pH, puis le chlore et enfin le stabilisant.
+                    </div>
+                    <div class="tip-item">
+                        <strong>Dilution :</strong> Diluez toujours les produits dans un seau d'eau avant de les verser dans la piscine.
+                    </div>
+                    <div class="tip-item">
+                        <strong>Délai :</strong> Attendez 4h entre chaque ajout et remesurez avant le traitement suivant.
+                    </div>
+                    <div class="tip-item">
+                        <strong>Sécurité :</strong> Portez des gants et lunettes de protection lors de la manipulation.
+                    </div>
+                    <div class="tip-item">
+                        <strong>Filtration :</strong> Laissez la filtration en marche pendant 24h après les traitements.
+                    </div>
+                    <div class="tip-item">
+                        <strong>Stockage :</strong> Conservez les produits dans un endroit sec, frais et aéré.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Coefficients de dosage (en g par m³ pour augmenter de 1 unité)
+        const dosageCoefficients = {
+            phPlus: 100, // g/m³ pour augmenter le pH de 0.1 (10g/m³ par 0.1)
+            phMinus: 70, // g/m³ pour diminuer le pH de 0.1 (7g/m³ par 0.1)
+            chlorine: {
+                'hypochlorite-ca': 15.0, // g/m³ pour 1 mg/L (70% de chlore actif)
+                'hypochlorite-na-13': 7.69, // mL/m³ pour 1 mg/L (13% de chlore actif)
+                'hypochlorite-na-95': 10.53, // mL/m³ pour 1 mg/L (9.5% de chlore actif)
+                'dichlore': 1.67, // g/m³ pour 1 mg/L (60% de chlore actif)
+                'trichlore': 1.11  // g/m³ pour 1 mg/L (90% de chlore actif)
+            },
+            alkalinity: 16.3, // g/m³ pour augmenter le TAC de 1 mg/L (10 ppm)
+            hardness: 1.1, // g/m³ pour augmenter le TH de 1 mg/L
+            stabilizer: 1.0 // g/m³ pour augmenter l'acide cyanurique de 1 mg/L
+        };
+
+        function calculatePh() {
+            console.log('Calcul pH...');
+            const volume = parseFloat(document.getElementById('pool-volume').value) || 50;
+            const currentPh = parseFloat(document.getElementById('ph-current').value);
+            const targetPh = parseFloat(document.getElementById('ph-target').value) || 7.2;
+            
+            console.log(`pH: volume=${volume}, current=${currentPh}, target=${targetPh}`);
+            
+            if (isNaN(currentPh) || currentPh === targetPh) {
+                document.getElementById('ph-dosage').textContent = 'Aucun ajustement nécessaire';
+                document.getElementById('ph-details').textContent = 'Le pH est déjà à la valeur cible ou non renseigné.';
+                return { dosage: '0 g', product: 'Aucun', details: 'pH correct' };
+            }
+            
+            let dosage, product, details;
+            
+            if (currentPh < targetPh) {
+                // Besoin de pH Plus
+                const phDifference = targetPh - currentPh;
+                const dosageGrams = Math.round(volume * dosageCoefficients.phPlus * (phDifference / 0.1));
+                dosage = dosageGrams > 999 ? `${(dosageGrams / 1000).toFixed(1)} kg` : `${dosageGrams} g`;
+                product = 'pH Plus (Carbonate de sodium)';
+                details = `Pour augmenter le pH de ${currentPh} à ${targetPh} dans ${volume}m³. Diluez bien avant ajout et versez en plusieurs fois espacés de 2h.`;
+            } else {
+                // Besoin de pH Minus
+                const phDifference = currentPh - targetPh;
+                const dosageGrams = Math.round(volume * dosageCoefficients.phMinus * (phDifference / 0.1));
+                dosage = dosageGrams > 999 ? `${(dosageGrams / 1000).toFixed(1)} kg` : `${dosageGrams} g`;
+                product = 'pH Minus (Bisulfate de sodium)';
+                details = `Pour diminuer le pH de ${currentPh} à ${targetPh} dans ${volume}m³. Diluez bien avant ajout et versez en plusieurs fois espacés de 2h.`;
+            }
+            
+            document.getElementById('ph-dosage').textContent = `${dosage} de ${product}`;
+            document.getElementById('ph-details').textContent = details;
+            
+            console.log(`pH calculé: ${dosage} de ${product}`);
+            return { dosage: dosage, product: product, details: details };
+        }
+
+        function calculateChlorine() {
+            console.log('Calcul Chlore...');
+            const volume = parseFloat(document.getElementById('pool-volume').value) || 50;
+            const currentChlorine = parseFloat(document.getElementById('chlorine-current').value);
+            const targetChlorine = parseFloat(document.getElementById('chlorine-target').value) || 1.5;
+            const chlorineType = document.getElementById('chlorine-type').value;
+            
+            console.log(`Chlore: volume=${volume}, current=${currentChlorine}, target=${targetChlorine}, type=${chlorineType}`);
+            
+            if (isNaN(currentChlorine) || currentChlorine >= targetChlorine) {
+                document.getElementById('chlorine-dosage').textContent = 'Aucun ajustement nécessaire';
+                document.getElementById('chlorine-details').textContent = 'Le taux de chlore est suffisant ou non renseigné.';
+                return { dosage: '0 g', product: 'Aucun', details: 'Chlore suffisant' };
+            }
+            
+            const chlorineDifference = targetChlorine - currentChlorine;
+            const dosageValue = Math.round(volume * dosageCoefficients.chlorine[chlorineType] * chlorineDifference);
+            
+            const unit = (chlorineType === 'hypochlorite-na-13' || chlorineType === 'hypochlorite-na-95') ? 'mL' : 'g';
+            let dosage;
+            if (unit === 'g' && dosageValue > 999) {
+                dosage = `${(dosageValue / 1000).toFixed(1)} kg`;
+            } else {
+                dosage = `${dosageValue} ${unit}`;
+            }
+            const productName = getChlorineProductName(chlorineType);
+            
+            document.getElementById('chlorine-dosage').textContent = `${dosage} de ${productName}`;
+            document.getElementById('chlorine-details').textContent = 
+                `Pour passer de ${currentChlorine} à ${targetChlorine} mg/L dans ${volume}m³. Répartissez autour de la piscine.`;
+            
+            console.log(`Chlore calculé: ${dosage} de ${productName}`);
+            return { dosage: dosage, product: productName, details: `Pour passer de ${currentChlorine} à ${targetChlorine} mg/L` };
+        }
+
+        function calculateAlkalinity() {
+            console.log('Calcul Alcalinité...');
+            const volume = parseFloat(document.getElementById('pool-volume').value) || 50;
+            const currentAlkalinity = parseFloat(document.getElementById('alkalinity-current').value);
+            const targetAlkalinity = parseFloat(document.getElementById('alkalinity-target').value) || 100;
+            
+            console.log(`TAC: volume=${volume}, current=${currentAlkalinity}, target=${targetAlkalinity}`);
+            
+            if (isNaN(currentAlkalinity) || currentAlkalinity >= targetAlkalinity) {
+                document.getElementById('alkalinity-dosage').textContent = 'Aucun ajustement nécessaire';
+                document.getElementById('alkalinity-details').textContent = 'Le TAC est suffisant ou non renseigné.';
+                return { dosage: '0 g', product: 'Aucun', details: 'TAC correct' };
+            }
+            
+            const alkalinityDifference = targetAlkalinity - currentAlkalinity;
+            const dosageGrams = Math.round(volume * dosageCoefficients.alkalinity * alkalinityDifference);
+            const dosage = dosageGrams > 999 ? `${(dosageGrams / 1000).toFixed(1)} kg` : `${dosageGrams} g`;
+            
+            document.getElementById('alkalinity-dosage').textContent = `${dosage} de TAC`;
+            document.getElementById('alkalinity-details').textContent = 
+                `Pour passer de ${currentAlkalinity} à ${targetAlkalinity} mg/L dans ${volume}m³. Diluez dans un seau d'eau.`;
+            
+            console.log(`TAC calculé: ${dosage} de TAC`);
+            return { dosage: dosage, product: 'TAC (Bicarbonate)', details: `Pour passer de ${currentAlkalinity} à ${targetAlkalinity} mg/L` };
+        }
+
+        function calculateStabilizer() {
+            console.log('Calcul Stabilisant...');
+            const volume = parseFloat(document.getElementById('pool-volume').value) || 50;
+            const currentStabilizer = parseFloat(document.getElementById('stabilizer-current').value);
+            const targetStabilizer = parseFloat(document.getElementById('stabilizer-target').value) || 30;
+            
+            console.log(`Stabilisant: volume=${volume}, current=${currentStabilizer}, target=${targetStabilizer}`);
+            
+            if (isNaN(currentStabilizer) || currentStabilizer >= targetStabilizer) {
+                document.getElementById('stabilizer-dosage').textContent = 'Aucun ajustement nécessaire';
+                document.getElementById('stabilizer-details').textContent = 'Le stabilisant est suffisant ou non renseigné.';
+                return { dosage: '0 g', product: 'Aucun', details: 'Stabilisant correct' };
+            }
+            
+            const stabilizerDifference = targetStabilizer - currentStabilizer;
+            const dosageGrams = Math.round(volume * dosageCoefficients.stabilizer * stabilizerDifference);
+            const dosage = dosageGrams > 999 ? `${(dosageGrams / 1000).toFixed(1)} kg` : `${dosageGrams} g`;
+            
+            document.getElementById('stabilizer-dosage').textContent = `${dosage} de Stabilisant`;
+            document.getElementById('stabilizer-details').textContent = 
+                `Pour passer de ${currentStabilizer} à ${targetStabilizer} mg/L dans ${volume}m³. Diluez dans l'écumoire ou skimmer.`;
+            
+            console.log(`Stabilisant calculé: ${dosage} de Stabilisant`);
+            return { dosage: dosage, product: 'Stabilisant', details: `Pour passer de ${currentStabilizer} à ${targetStabilizer} mg/L` };
+        }
+
+        function getChlorineProductName(type) {
+            const names = {
+                'hypochlorite-ca': 'Hypochlorite de calcium 70%',
+                'hypochlorite-na-13': 'Hypochlorite de sodium 13%',
+                'hypochlorite-na-95': 'Hypochlorite de sodium 9,5%',
+                'dichlore': 'Chlore choc stabilisé 60%',
+                'trichlore': 'Galet chlore stabilisé 90%'
+            };
+            return names[type] || 'Chlore';
+        }
+
+        function calculateAllDosages() {
+            console.log('=== DÉBUT CALCUL COMPLET ===');
+            
+            // Vérifier que tous les éléments existent avant de calculer
+            const requiredElements = [
+                'pool-volume', 'ph-current', 'ph-target', 'ph-dosage', 'ph-details',
+                'chlorine-current', 'chlorine-target', 'chlorine-dosage', 'chlorine-details',
+                'alkalinity-current', 'alkalinity-target', 'alkalinity-dosage', 'alkalinity-details',
+                'stabilizer-current', 'stabilizer-target', 'stabilizer-dosage', 'stabilizer-details'
+            ];
+            
+            let missingElements = [];
+            requiredElements.forEach(id => {
+                if (!document.getElementById(id)) {
+                    missingElements.push(id);
+                }
+            });
+            
+            if (missingElements.length > 0) {
+                console.error('Éléments manquants:', missingElements);
+                return;
+            }
+            
+            // Forcer l'affichage des résultats
+            ['ph-result', 'chlorine-result', 'alkalinity-result', 'stabilizer-result'].forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.style.display = 'block';
+                    element.style.visibility = 'visible';
+                }
+            });
+            
+            try {
+                const results = {
+                    ph: calculatePh(),
+                    chlorine: calculateChlorine(),
+                    alkalinity: calculateAlkalinity(),
+                    stabilizer: calculateStabilizer()
+                };
+
+                console.log('Résultats calculés:', results);
+                updateSummary(results);
+                console.log('=== FIN CALCUL COMPLET ===');
+                
+            } catch (error) {
+                console.error('Erreur lors du calcul:', error);
+            }
+        }
+
+        function updateSummary(results) {
+            console.log('Mise à jour du résumé...');
+            const summaryGrid = document.getElementById('summary-grid');
+            const summarySection = document.getElementById('summary-section');
+            
+            if (!summaryGrid || !summarySection) {
+                console.error('Éléments summary non trouvés');
+                return;
+            }
+            
+            summaryGrid.innerHTML = '';
+            let hasActiveDosages = false;
+
+            const products = [
+                { key: 'alkalinity', name: 'TAC (Bicarbonate)', priority: 1 },
+                { key: 'ph', name: 'Correction pH', priority: 2 },
+                { key: 'chlorine', name: 'Chlore', priority: 3 },
+                { key: 'stabilizer', name: 'Stabilisant', priority: 4 }
+            ];
+
+            products.forEach(product => {
+                const result = results[product.key];
+                console.log(`Traitement ${product.key}:`, result);
+                
+                if (result && result.dosage && result.dosage !== '0 g' && !result.dosage.startsWith('0 ') && result.product !== 'Aucun') {
+                    hasActiveDosages = true;
+                    const summaryItem = document.createElement('div');
+                    summaryItem.className = 'summary-item';
+                    summaryItem.innerHTML = `
+                        <div class="summary-product">${result.product || product.name}</div>
+                        <div class="summary-dosage">${result.dosage}</div>
+                        <div style="font-size: 0.9rem; opacity: 0.8; margin-top: 5px;">
+                            Priorité ${product.priority} - ${getPriorityText(product.priority)}
+                        </div>
+                    `;
+                    summaryGrid.appendChild(summaryItem);
+                    console.log(`Ajouté au résumé: ${product.key} = ${result.dosage}`);
+                }
+            });
+
+            if (hasActiveDosages) {
+                summarySection.style.display = 'block';
+                console.log('Résumé affiché avec', summaryGrid.children.length, 'éléments');
+                
+                // Ajouter les instructions d'ordre
+                const instructionsItem = document.createElement('div');
+                instructionsItem.className = 'summary-item';
+                instructionsItem.style.gridColumn = '1 / -1';
+                instructionsItem.style.background = 'rgba(255, 255, 255, 0.25)';
+                instructionsItem.innerHTML = `
+                    <div style="font-weight: 600; margin-bottom: 10px;">⚠️ Ordre d'application recommandé :</div>
+                    <div style="font-size: 0.95rem; line-height: 1.4;">
+                        1. TAC (Alcalinité) → Attendre 4h et remesurer<br>
+                        2. pH → Attendre 4h et remesurer<br>
+                        3. Chlore → Attendre 2h<br>
+                        4. Stabilisant → Si nécessaire
+                    </div>
+                `;
+                summaryGrid.appendChild(instructionsItem);
+            } else {
+                summarySection.style.display = 'none';
+                console.log('Aucun dosage nécessaire - résumé masqué');
+            }
+        }
+
+        function getPriorityText(priority) {
+            const priorities = {
+                1: 'À faire en premier',
+                2: 'Après le TAC',
+                3: 'Après le pH',
+                4: 'Si nécessaire'
+            };
+            return priorities[priority] || '';
+        }
+
+        // Initialisation robuste
+        function initializeApp() {
+            console.log('Initialisation de l\'application');
+            
+            // Vérifier que tous les éléments existent
+            const criticalElements = [
+                'pool-volume', 'ph-current', 'ph-target', 'chlorine-current', 
+                'chlorine-target', 'alkalinity-current', 'alkalinity-target',
+                'stabilizer-current', 'stabilizer-target',
+                'ph-result', 'chlorine-result', 'alkalinity-result', 'stabilizer-result'
+            ];
+            
+            let allElementsReady = true;
+            criticalElements.forEach(id => {
+                const element = document.getElementById(id);
+                if (!element) {
+                    console.error(`Élément manquant: ${id}`);
+                    allElementsReady = false;
+                }
+            });
+            
+            if (!allElementsReady) {
+                console.log('Certains éléments manquent, nouvel essai dans 500ms...');
+                setTimeout(initializeApp, 500);
+                return;
+            }
+            
+            // Forcer l'affichage de tous les résultats
+            ['ph-result', 'chlorine-result', 'alkalinity-result', 'stabilizer-result'].forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.style.display = 'block';
+                }
+            });
+            
+            // Ajouter les event listeners
+            addEventListeners();
+            
+            // Calcul initial
+            setTimeout(() => {
+                console.log('Calcul initial automatique...');
+                calculateAllDosages();
+            }, 500);
+        }
+        
+        function addEventListeners() {
+            // Event listeners pour le calcul automatique
+            const inputs = [
+                'pool-volume', 'ph-current', 'ph-target', 'chlorine-current', 
+                'chlorine-target', 'chlorine-type', 'alkalinity-current', 'alkalinity-target',
+                'stabilizer-current', 'stabilizer-target'
+            ];
+            
+            inputs.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.addEventListener('input', () => {
+                        setTimeout(calculateAllDosages, 100);
+                    });
+                    element.addEventListener('change', () => {
+                        setTimeout(calculateAllDosages, 100);
+                    });
+                }
+            });
+        }
+
+        // Multiple points d'entrée pour l'initialisation
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initializeApp);
+        } else {
+            // DOM déjà chargé
+            initializeApp();
+        }
+        
+        // Backup au cas où
+        window.addEventListener('load', () => {
+            setTimeout(initializeApp, 100);
+        });
+
+        // Fonction appelée par le bouton (plus robuste)
+        function manualCalculate() {
+            console.log('Calcul manuel déclenché');
+            
+            // Forcer l'affichage des sections de résultats
+            const resultSections = ['ph-result', 'chlorine-result', 'alkalinity-result', 'stabilizer-result'];
+            resultSections.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.style.display = 'block';
+                    element.style.visibility = 'visible';
+                    element.style.opacity = '1';
+                }
+            });
+            
+            // Attendre un peu puis calculer
+            setTimeout(() => {
+                calculateAllDosages();
+            }, 50);
+        }
+
+        // Fonction de test accessible globalement
+        window.testCalculation = function() {
+            console.log('=== TEST MANUEL ===');
+            console.log('Volume:', document.getElementById('pool-volume')?.value || 'N/A');
+            console.log('pH actuel:', document.getElementById('ph-current')?.value || 'N/A');
+            console.log('pH cible:', document.getElementById('ph-target')?.value || 'N/A');
+            manualCalculate();
+        };
+
+        // Fonction de réinitialisation accessible globalement
+        window.resetCalculator = function() {
+            console.log('Réinitialisation du calculateur');
+            initializeApp();
+        };
+    </script>
+</body>
+</html>
